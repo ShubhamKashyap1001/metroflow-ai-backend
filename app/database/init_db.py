@@ -1,11 +1,14 @@
-from app.database.database import Base
+from app.database.base import Base
 from app.database.database import engine
 
-import app.database.base
+# Import all models
+from app.models import *
 
-def create_database():
+
+def create_tables():
     Base.metadata.create_all(bind=engine)
-    print("Database Tables Created Successfully")
+
 
 if __name__ == "__main__":
-    create_database()
+    create_tables()
+    print("✅ Database Tables Created Successfully")
