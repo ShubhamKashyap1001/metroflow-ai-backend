@@ -6,4 +6,3 @@ uvicorn app.main:app --reload
 
 deactivate
 
-exit()
