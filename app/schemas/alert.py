@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+source venv/bin/activafrom pydantic import BaseModel
 from pydantic import ConfigDict
 from app.enums.alert_type import AlertType
 
