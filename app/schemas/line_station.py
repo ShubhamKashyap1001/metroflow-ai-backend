@@ -7,7 +7,6 @@ class LineStationCreate(BaseModel):
     station_order: int
     distance_from_previous: float = 0
 
-
 class LineStationResponse(BaseModel):
     id: int
     line_id: int

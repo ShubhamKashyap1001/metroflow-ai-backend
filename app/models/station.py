@@ -9,7 +9,6 @@ from sqlalchemy.orm import relationship
 from app.database.base import Base
 from app.mixins.timestamp import TimestampMixin
 
-
 class Station(TimestampMixin, Base):
 
     __tablename__ = "stations"
@@ -55,8 +54,6 @@ class Station(TimestampMixin, Base):
         default=True
     )
 
-    # Rated passenger capacity, used to derive crowd density / congestion
-    # ratios in the Crowd Monitoring Module.
     capacity: Mapped[int] = mapped_column(
         default=5000
     )

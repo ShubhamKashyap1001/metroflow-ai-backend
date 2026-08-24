@@ -14,7 +14,6 @@ router = APIRouter(
     tags=["Check-In"]
 )
 
-
 @router.post("/", response_model=JourneyResponse, status_code=201)
 def check_in(
     payload: CheckInRequest,

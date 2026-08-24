@@ -6,7 +6,6 @@ from pydantic import ConfigDict
 from app.enums.notification_channel import NotificationChannel
 from app.enums.notification_status import NotificationStatus
 
-
 class NotificationLogResponse(BaseModel):
     id: int
     alert_id: int

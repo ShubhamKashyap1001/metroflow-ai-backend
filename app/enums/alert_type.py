@@ -1,6 +1,5 @@
 import enum
 
-
 class AlertType(str, enum.Enum):
     OVERCROWDING = "overcrowding"
     DELAY = "delay"

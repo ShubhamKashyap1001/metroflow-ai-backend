@@ -1,6 +1,5 @@
 import enum
 
-
 class CrowdLevel(str, enum.Enum):
     LOW = "low"
     MODERATE = "moderate"

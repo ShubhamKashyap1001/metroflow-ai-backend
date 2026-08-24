@@ -20,7 +20,6 @@ from app.utils.geo import cities_for_state
 from app.websocket.events import STATION_ALERT
 from app.websocket.manager import manager
 
-
 def _broadcast_alert(db: Session, alert: Alert, resolved: bool) -> None:
     """Pushes the alert to every connected operator immediately over
     /ws/monitor - the sync/thread-safe notify() variant, since this is
@@ -37,7 +36,6 @@ def _broadcast_alert(db: Session, alert: Alert, resolved: bool) -> None:
         "is_resolved": resolved,
         "created_at": alert.created_at.isoformat() if alert.created_at else None,
     })
-
 
 def list_alerts(
     db: Session,
@@ -57,13 +55,8 @@ def list_alerts(
         )
     return query.order_by(Alert.created_at.desc()).all()
 
-
 def create_alert(db: Session, payload: AlertCreate, created_by: str | None = None) -> Alert:
-    # notify_email / notify_sms ARE also persisted as real columns on
-    # the alerts table now (see app/models/alert.py) - included here on
-    # purpose, unlike before, so resolve_alert() can look up which
-    # channels this alert was originally raised on and re-notify the
-    # same audience the same way.
+                                                                     
     alert = Alert(**payload.model_dump(), created_by=created_by)
     db.add(alert)
     db.commit()
@@ -73,13 +66,11 @@ def create_alert(db: Session, payload: AlertCreate, created_by: str | None = Non
 
     return alert
 
-
 def get_alert(db: Session, alert_id: int) -> Alert:
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     return alert
-
 
 def resolve_alert(db: Session, alert_id: int) -> Alert:
     alert = get_alert(db, alert_id)
@@ -91,7 +82,6 @@ def resolve_alert(db: Session, alert_id: int) -> Alert:
         db.refresh(alert)
         _broadcast_alert(db, alert, resolved=True)
     return alert
-
 
 def _log_results(db: Session, alert_id: int, channel: NotificationChannel, results: dict[str, str]) -> None:
     for recipient, outcome in results.items():
@@ -107,7 +97,6 @@ def _log_results(db: Session, alert_id: int, channel: NotificationChannel, resul
             )
         )
     db.commit()
-
 
 def _dispatch(
     alert_id: int,
@@ -133,17 +122,6 @@ def _dispatch(
             alert.available_until.isoformat() if alert.available_until else None
         )
 
-        # Exclude the simulator's virtual passenger pool (see
-        # app/simulator/live_simulator.py - up to
-        # SIMULATOR_PASSENGER_POOL_SIZE fake accounts under
-        # @sim.metroflow.internal, used only to drive the crowd
-        # heatmap). They were previously included in "every active
-        # user", and since that domain isn't a real mailbox, every
-        # alert queued up dozens of doomed sends that came back as
-        # delivery-failure bounces - landing right back in
-        # SMTP_FROM_EMAIL's own inbox, which is what made ONE alert
-        # look like it produced 10 emails. Only real admin/operator/
-        # passenger accounts should ever be notified.
         active_users = (
             db.query(UserProfile)
             .filter(
@@ -175,9 +153,7 @@ def _dispatch(
                 _log_results(db, alert.id, NotificationChannel.EMAIL, results)
 
         if notify_sms:
-            # Only users who actually have a phone number on file get
-            # texted - i.e. those who signed up with one, or logged in
-            # via phone/OTP (which requires a phone to exist at all).
+                                                                     
             phones = {u.phone for u in active_users if u.phone}
             if creator and creator.phone:
                 phones.add(creator.phone)
@@ -194,7 +170,6 @@ def _dispatch(
     finally:
         db.close()
 
-
 def dispatch_alert_notifications(
     alert_id: int,
     created_by_id: str | None,
@@ -205,7 +180,6 @@ def dispatch_alert_notifications(
     plus an explicit copy to whoever raised it, and log one
     NotificationLog row per (channel, recipient)."""
     _dispatch(alert_id, created_by_id, notify_email, notify_sms, resolved=False)
-
 
 def dispatch_alert_resolution_notifications(alert_id: int, resolved_by_id: str | None) -> None:
     """Re-notify the same audience that the alert has been resolved,
@@ -223,7 +197,6 @@ def dispatch_alert_resolution_notifications(alert_id: int, resolved_by_id: str |
         db.close()
 
     _dispatch(alert_id, resolved_by_id, notify_email, notify_sms, resolved=True)
-
 
 def list_alert_notifications(db: Session, alert_id: int) -> list[NotificationLog]:
     return (

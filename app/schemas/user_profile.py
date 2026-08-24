@@ -5,7 +5,6 @@ from pydantic import ConfigDict
 
 from app.enums.user_role import UserRole
 
-
 class UserProfileUpdate(BaseModel):
     full_name: str | None = None
     username: str | None = None
@@ -13,7 +12,6 @@ class UserProfileUpdate(BaseModel):
     avatar_url: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
-
 
 class UserProfileResponse(BaseModel):
     id: UUID

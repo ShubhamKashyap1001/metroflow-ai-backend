@@ -24,10 +24,8 @@ STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv")
 TRAIN_OPERATIONS_CSV = os.path.join(DATASET_DIR, "train_operations.csv")
 
-
 def _norm_key(city: str, name: str) -> tuple[str, str]:
     return city.strip().lower(), name.strip().lower()
-
 
 def _station_id_map() -> dict[tuple[str, str], int]:
     """Same cleaning/ordering as app/database/seed_real_data.py::_clean_stations,
@@ -47,7 +45,6 @@ def _station_id_map() -> dict[tuple[str, str], int]:
         stations["station_id"],
     ))
 
-
 def _crowd_table(station_id_map: dict) -> pd.DataFrame:
     df = pd.read_csv(PASSENGER_FLOW_CSV)
     df["city"] = df["city"].astype(str).str.strip()
@@ -62,14 +59,11 @@ def _crowd_table(station_id_map: dict) -> pd.DataFrame:
     df["passenger_count"] = df["entries"] + df["exits"]
     df["is_peak_hour"] = ((df["hour"].between(8, 11)) | (df["hour"].between(17, 20))).astype(int)
 
-    # One row per station/hour/day_of_week: average real passenger_count
-    # across every day in the dataset that matches that slot.
     grouped = (
         df.groupby(["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"])
         ["passenger_count"].mean().round().astype(int).reset_index()
     )
     return grouped
-
 
 def _delay_table(station_id_map: dict) -> pd.DataFrame:
     df = pd.read_csv(TRAIN_OPERATIONS_CSV)
@@ -92,16 +86,11 @@ def _delay_table(station_id_map: dict) -> pd.DataFrame:
     )
     return grouped
 
-
 def build_real_dataset() -> pd.DataFrame:
     station_id_map = _station_id_map()
     crowd = _crowd_table(station_id_map)
     delay = _delay_table(station_id_map)
 
-    # Left-join delay onto crowd (crowd has broader station/hour/day
-    # coverage since passenger_flow.csv is denser than train_operations.csv);
-    # slots with no matching real delay sample fall back to 0 (no observed
-    # delay for that slot), rather than being dropped.
     merged = crowd.merge(delay, on=["station_id", "hour", "day_of_week"], how="left")
     merged["delay_minutes"] = merged["delay_minutes"].fillna(0.0)
 
@@ -110,13 +99,11 @@ def build_real_dataset() -> pd.DataFrame:
         "passenger_count", "delay_minutes",
     ]]
 
-
 def save_dataset(path: str) -> str:
     df = build_real_dataset()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     df.to_csv(path, index=False)
     return path
-
 
 if __name__ == "__main__":
     out = save_dataset(os.path.join(os.path.dirname(__file__), "output", "real_ridership_data.csv"))

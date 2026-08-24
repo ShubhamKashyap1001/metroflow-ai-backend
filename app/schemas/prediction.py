@@ -5,7 +5,6 @@ from pydantic import ConfigDict
 
 from app.enums.prediction_type import PredictionType
 
-
 class PredictionCreate(BaseModel):
     station_id: int
     predicted_count: int | None = None
@@ -14,7 +13,6 @@ class PredictionCreate(BaseModel):
     predicted_value: float = 0
     target_datetime: datetime | None = None
     model_version: str | None = None
-
 
 class PredictionResponse(BaseModel):
     id: int
@@ -29,28 +27,21 @@ class PredictionResponse(BaseModel):
         from_attributes=True
     )
 
-
-# --- Request/response shapes used by the AI Prediction Module endpoints ---
-
 class CrowdPredictionRequest(BaseModel):
     station_id: int
     target_datetime: datetime | None = None
-
 
 class DemandForecastRequest(BaseModel):
     station_id: int
     hours_ahead: int = 6
 
-
 class DelayPredictionRequest(BaseModel):
     train_id: int
     station_id: int
 
-
 class FrequencyRecommendationRequest(BaseModel):
     station_id: int
     is_peak_hour: bool = False
-
 
 class SmartRecommendation(BaseModel):
     station_id: int
@@ -58,21 +49,33 @@ class SmartRecommendation(BaseModel):
     detail: str
     severity: str = "info"
 
+class AggregateHourPoint(BaseModel):
+    hour: int
+    predicted_count: int
+    is_peak_hour: bool
 
-# --- New: Predictive Maintenance (real predictive_maintenance.csv dataset) ---
+class AggregateTrafficPattern(BaseModel):
+    station_count: int
+    hourly_forecast: list[AggregateHourPoint]
+    peak_hour: int
+    peak_predicted_count: int
+    quietest_hour: int
 
-class MaintenanceReadingRequest(BaseModel):
-    train_id: int
-    compressor_pressure_bar: float
-    motor_current_amp: float
-    oil_temperature_c: float
-    vibration_amplitude_mm: float
-    air_leakage_flow: float
-    operating_hours: float
+class FeatureImportanceItem(BaseModel):
+    feature: str
+    importance: float
 
-
-class MaintenanceResponse(BaseModel):
-    train_id: int
-    predicted_remaining_useful_life_hrs: float
-    health_status: str
-    model_version: str
+class CrowdModelMetrics(BaseModel):
+    available: bool
+    model_name: str | None = None
+    mae: float | None = None
+    mape_pct: float | None = None
+    r2: float | None = None
+    accuracy: float | None = None
+    macro_f1: float | None = None
+    critical_recall: float | None = None
+    trained_rows: int | None = None
+    test_rows: int | None = None
+    classes: list[str] = []
+    confusion_matrix: list[list[int]] = []
+    feature_importance: list[FeatureImportanceItem] = []

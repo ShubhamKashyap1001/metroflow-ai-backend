@@ -3,6 +3,7 @@ from datetime import time
 from sqlalchemy import Boolean
 from sqlalchemy import Enum
 from sqlalchemy import ForeignKey
+from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import Time
 
@@ -15,10 +16,15 @@ from app.enums.day_type import DayType
 from app.enums.schedule_status import ScheduleStatus
 from app.mixins.timestamp import TimestampMixin
 
-
 class TrainSchedule(TimestampMixin, Base):
 
     __tablename__ = "train_schedules"
+
+    __table_args__ = (
+        Index("ix_train_schedules_station_id_day_type", "station_id", "day_type"),
+        Index("ix_train_schedules_station_id_status", "station_id", "status"),
+        Index("ix_train_schedules_train_id", "train_id"),
+    )
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
@@ -37,8 +43,6 @@ class TrainSchedule(TimestampMixin, Base):
     departure_time: Mapped[time]
     platform_number: Mapped[int]
 
-    # --- Milestone 2: Scheduling Management Module ---
-
     day_type: Mapped[DayType] = mapped_column(
         Enum(DayType),
         default=DayType.WEEKDAY
@@ -49,9 +53,6 @@ class TrainSchedule(TimestampMixin, Base):
         default=False
     )
 
-    # Planned headway (minutes between consecutive trains on this
-    # station/line during this slot). Used by the frequency
-    # optimization / adjustment workflow.
     frequency_minutes: Mapped[int] = mapped_column(
         Integer,
         default=10
@@ -62,14 +63,11 @@ class TrainSchedule(TimestampMixin, Base):
         default=ScheduleStatus.ON_TIME
     )
 
-    # Delay handling: minutes of delay applied to this schedule entry.
     delay_minutes: Mapped[int] = mapped_column(
         Integer,
         default=0
     )
 
-    # Actual (observed) arrival/departure once reported. Nullable until
-    # real-time monitoring updates it.
     actual_arrival_time: Mapped[time | None] = mapped_column(
         Time,
         nullable=True

@@ -1,3 +1,15 @@
+"""SMS dispatch for the Alert & Notification Module, via Twilio's REST
+API. Uses Twilio because it's the most widely available SMS provider
+with a free trial, and its API is a single authenticated POST request
+- so this uses Python's built-in urllib instead of adding the twilio
+SDK as a new dependency.
+
+Needs a Twilio account (https://www.twilio.com/try-twilio): the
+Account SID, Auth Token, and a Twilio phone number to send from, all
+set in .env (see TWILIO_* below). Without those set, this degrades
+the same way app/core/email.py does when SMTP isn't configured - it
+logs "not configured" per recipient instead of raising.
+"""
 import base64
 import urllib.error
 import urllib.parse
@@ -7,7 +19,6 @@ from app.core.config import settings
 
 TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 
-
 def _build_alert_sms(
     station_name: str,
     alert_type: str,
@@ -15,8 +26,7 @@ def _build_alert_sms(
     available_until: str | None = None,
     resolved: bool = False,
 ) -> str:
-    # SMS has no formatting and a practical length limit - keep this
-    # short, unlike the full HTML email.
+                                                                    
     if resolved:
         text = f"[MetroFlow] RESOLVED - {alert_type.upper()} at {station_name}: {message}"
     else:
@@ -24,7 +34,6 @@ def _build_alert_sms(
         if available_until:
             text += f" Expected back by {available_until}."
     return text[:300]
-
 
 def send_alert_sms(
     recipients: list[str],
@@ -79,8 +88,7 @@ def send_alert_sms(
                 else:
                     results[recipient] = f"failed: Twilio returned HTTP {resp.status}"
         except urllib.error.HTTPError as exc:
-            # Twilio's error body usually has a human-readable reason
-            # (invalid number, unverified trial number, etc.)
+                                                                     
             try:
                 detail = exc.read().decode()[:200]
             except Exception:

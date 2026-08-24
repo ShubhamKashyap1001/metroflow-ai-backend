@@ -1,15 +1,36 @@
-
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import cache
 from app.enums.crowd_level import CrowdLevel
 from app.models.crowd_log import CrowdLog
 from app.models.station import Station
 from app.schemas.crowd_log import CrowdLogCreate
-from app.utils.geo import cities_for_state
+from app.utils.geo import cities_for_state, state_for_city
+
+def invalidate_station_cache(station: Station) -> None:
+    """Drop every cached view that this station's new crowd count affects.
+
+    Called right after a crowd log commit so the next read (even one
+    that lands well inside the TTL) sees the fresh count instead of a
+    stale one - the TTL alone is a staleness *ceiling*, this is what
+    keeps the common case (read shortly after a write) accurate too.
+    Public (no leading underscore) so other services that write a
+    CrowdLog directly in their own transaction - e.g. journey_service,
+    which batches the crowd bump into the same commit as the journey
+    row instead of going through log_crowd_count()'s separate commit -
+    can invalidate the same keys without duplicating this logic.
+    """
+    cache.delete(f"crowd:latest:{station.id}")
+    cache.delete("crowd:dashboard:all")
+    state = state_for_city(station.city)
+    if state:
+        cache.delete(f"crowd:dashboard:{state}")
+                                                                        
+    cache.delete(f"crowd:dashboard:{station.city}")
 
 def log_crowd_count(db: Session, payload: CrowdLogCreate) -> CrowdLog:
     station = db.get(Station, payload.station_id)
@@ -27,54 +48,106 @@ def log_crowd_count(db: Session, payload: CrowdLogCreate) -> CrowdLog:
     db.add(log)
     db.commit()
     db.refresh(log)
+    invalidate_station_cache(station)
     return log
 
 def get_latest_crowd(db: Session, station_id: int) -> CrowdLog | None:
-    return (
+                                                                         
+    cache_key = f"crowd:latest:{station_id}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return CrowdLog(**cached)
+
+    log = (
         db.query(CrowdLog)
         .filter(CrowdLog.station_id == station_id)
         .order_by(CrowdLog.created_at.desc())
         .first()
     )
+    if log is not None:
+        cache.set_json(cache_key, {
+            "id": log.id,
+            "station_id": log.station_id,
+            "current_count": log.current_count,
+            "crowd_level": log.crowd_level,
+            "created_at": log.created_at,
+        })
+    return log
 
 def get_station_wise_snapshot(db: Session, state: str | None = None) -> list[dict]:
-    query = db.query(Station).filter(Station.is_active.is_(True))
+                                                                          
+    cache_key = f"crowd:dashboard:{state or 'all'}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    snapshot = _get_station_wise_snapshot_from_db(db, state)
+    cache.set_json(cache_key, snapshot)
+    return snapshot
+
+def _get_station_wise_snapshot_from_db(db: Session, state: str | None = None) -> list[dict]:
+    latest_per_station = (
+        db.query(
+            CrowdLog.station_id.label("station_id"),
+            CrowdLog.current_count.label("current_count"),
+            CrowdLog.crowd_level.label("crowd_level"),
+            CrowdLog.created_at.label("created_at"),
+            func.row_number()
+            .over(
+                partition_by=CrowdLog.station_id,
+                order_by=CrowdLog.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            Station,
+            latest_per_station.c.current_count,
+            latest_per_station.c.crowd_level,
+            latest_per_station.c.created_at,
+        )
+        .outerjoin(
+            latest_per_station,
+            (latest_per_station.c.station_id == Station.id)
+            & (latest_per_station.c.rn == 1),
+        )
+        .filter(Station.is_active.is_(True))
+    )
+
     cities = cities_for_state(state)
     if cities:
         query = query.filter(Station.city.in_(cities))
-    stations = query.all()
+
+    rows = query.all()
+
     snapshot = []
-    for station in stations:
-        latest = get_latest_crowd(db, station.id)
+    for station, current_count, crowd_level, last_updated in rows:
+        current_count = current_count or 0
         snapshot.append({
             "station_id": station.id,
             "station_name": station.station_name,
             "capacity": station.capacity,
-            "current_count": latest.current_count if latest else 0,
-            "crowd_level": latest.crowd_level if latest else CrowdLevel.LOW,
-            "occupancy_ratio": round((latest.current_count / station.capacity), 3)
-            if latest and station.capacity else 0,
-            "last_updated": latest.created_at if latest else None,
+            "current_count": current_count,
+            "crowd_level": crowd_level or CrowdLevel.LOW,
+            "occupancy_ratio": round((current_count / station.capacity), 3)
+            if station.capacity else 0,
+            "last_updated": last_updated,
+            "latitude": station.latitude,
+            "longitude": station.longitude,
         })
     return snapshot
 
 def get_heatmap(db: Session, state: str | None = None, limit: int | None = None) -> list[dict]:
     snapshot = get_station_wise_snapshot(db, state)
-    stations_by_id = {s.id: s for s in db.query(Station).all()}
-    heatmap = []
-    for entry in snapshot:
-        station = stations_by_id.get(entry["station_id"])
-        if not station:
-            continue
-        if station.latitude is None or station.longitude is None:
-            continue
-        if station.latitude == 0 and station.longitude == 0:
-            continue
-        heatmap.append({
-            **entry,
-            "latitude": station.latitude,
-            "longitude": station.longitude,
-        })
+    heatmap = [
+        entry for entry in snapshot
+        if entry["latitude"] is not None
+        and entry["longitude"] is not None
+        and not (entry["latitude"] == 0 and entry["longitude"] == 0)
+    ]
     if limit is not None:
         heatmap.sort(key=lambda h: h.get("occupancy_ratio") or 0, reverse=True)
         heatmap = heatmap[:limit]

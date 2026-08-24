@@ -1,10 +1,3 @@
-"""Milestone 2 - Scheduling Management Module API.
-
-Train schedule management, peak-hour optimization, frequency
-adjustment, delay handling. (`app/api/v1/schedules.py` is an older,
-Supabase-based file kept for reference but not wired into the app -
-see app/main.py.)
-"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -27,7 +20,6 @@ router = APIRouter(
     tags=["Scheduling"]
 )
 
-
 @router.get("/", response_model=list[TrainScheduleResponse])
 def list_schedules(
     station_id: int | None = None,
@@ -38,7 +30,6 @@ def list_schedules(
 ):
     return schedule_service.list_schedules(db, station_id, train_id, day_type, state)
 
-
 @router.get("/peak-hours", response_model=list[TrainScheduleResponse])
 def peak_hour_schedules(
     station_id: int | None = None,
@@ -47,7 +38,6 @@ def peak_hour_schedules(
 ):
     """Peak-hour optimization: currently flagged peak-hour slots."""
     return schedule_service.peak_hour_schedules(db, station_id, state)
-
 
 @router.get("/delayed", response_model=list[TrainScheduleResponse])
 def delayed_schedules(
@@ -58,11 +48,9 @@ def delayed_schedules(
     """Delay handling: currently delayed schedule entries."""
     return schedule_service.delayed_schedules(db, station_id, state)
 
-
 @router.get("/{schedule_id}", response_model=TrainScheduleResponse)
 def get_schedule(schedule_id: int, db: Session = Depends(get_db)):
     return schedule_service.get_schedule(db, schedule_id)
-
 
 @router.post("/", response_model=TrainScheduleResponse, status_code=201)
 def create_schedule(
@@ -71,7 +59,6 @@ def create_schedule(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     return schedule_service.create_schedule(db, payload)
-
 
 @router.put("/{schedule_id}", response_model=TrainScheduleResponse)
 def update_schedule(
@@ -82,7 +69,6 @@ def update_schedule(
 ):
     return schedule_service.update_schedule(db, schedule_id, payload)
 
-
 @router.patch("/{schedule_id}/delay", response_model=TrainScheduleResponse)
 def report_delay(
     schedule_id: int,
@@ -92,7 +78,6 @@ def report_delay(
 ):
     """Delay handling workflow."""
     return schedule_service.handle_delay(db, schedule_id, payload)
-
 
 @router.patch("/{schedule_id}/frequency", response_model=TrainScheduleResponse)
 def adjust_frequency(

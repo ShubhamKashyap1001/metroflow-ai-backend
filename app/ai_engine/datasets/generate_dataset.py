@@ -18,7 +18,6 @@ np.random.seed(42)
 OUTPUT_DIR = os.path.dirname(__file__)
 NUM_STATIONS = 20
 
-
 def _base_demand(hour: int, is_weekend: int) -> float:
     """Rough double-hump commuter curve, dampened on weekends."""
     morning_peak = np.exp(-((hour - 9) ** 2) / 4) * 900
@@ -28,11 +27,10 @@ def _base_demand(hour: int, is_weekend: int) -> float:
         base *= 0.55
     return base
 
-
 def generate_ridership_dataset(days: int = 60) -> pd.DataFrame:
     rows = []
     for station_id in range(1, NUM_STATIONS + 1):
-        # Each station has its own footfall multiplier (interchange hubs busier).
+                                                                                 
         station_multiplier = np.random.uniform(0.6, 1.8)
         for day in range(days):
             day_of_week = day % 7
@@ -42,7 +40,6 @@ def generate_ridership_dataset(days: int = 60) -> pd.DataFrame:
                 noise = np.random.normal(0, demand * 0.08)
                 passenger_count = max(0, int(demand + noise))
 
-                # Delay grows with congestion + random incidents.
                 congestion_factor = passenger_count / 1000
                 delay_minutes = max(0, np.random.normal(congestion_factor * 4, 1.5))
 
@@ -59,13 +56,11 @@ def generate_ridership_dataset(days: int = 60) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-
 def save_dataset(path: str = None) -> str:
     df = generate_ridership_dataset()
     path = path or os.path.join(OUTPUT_DIR, "ridership_data.csv")
     df.to_csv(path, index=False)
     return path
-
 
 if __name__ == "__main__":
     out_path = save_dataset()

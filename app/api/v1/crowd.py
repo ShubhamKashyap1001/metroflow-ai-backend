@@ -1,8 +1,3 @@
-"""Milestone 1 - Crowd Monitoring Module.
-
-Fixed: previously imported a non-existent `database.supabase` client and
-had no request validation. Now backed by SQLAlchemy + crowd_service.
-"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -16,18 +11,15 @@ router = APIRouter(
     tags=["Crowd Management"]
 )
 
-
 @router.post("/", response_model=CrowdLogResponse, status_code=201)
 def log_crowd(payload: CrowdLogCreate, db: Session = Depends(get_db)):
     """Ingest a passenger density reading for a station (ticketing / sensor feed)."""
     return crowd_service.log_crowd_count(db, payload)
 
-
 @router.get("/dashboard")
 def crowd_dashboard(state: str | None = None, db: Session = Depends(get_db)):
     """Live station-wise crowd snapshot for the monitoring dashboard."""
     return crowd_service.get_station_wise_snapshot(db, state)
-
 
 @router.get("/heatmap")
 def crowd_heatmap(
@@ -43,7 +35,6 @@ def crowd_heatmap(
     """
     return crowd_service.get_heatmap(db, state, limit)
 
-
 @router.get("/congestion")
 def congestion(
     min_level: CrowdLevel = CrowdLevel.HIGH,
@@ -53,7 +44,6 @@ def congestion(
     """Congestion monitoring: stations at/above a given crowd level."""
     return crowd_service.get_congested_stations(db, min_level, state)
 
-
 @router.get("/{station_id}")
 def get_station_crowd(station_id: int, db: Session = Depends(get_db)):
     latest = crowd_service.get_latest_crowd(db, station_id)
@@ -61,12 +51,10 @@ def get_station_crowd(station_id: int, db: Session = Depends(get_db)):
         return {"message": "No crowd data recorded for this station yet"}
     return CrowdLogResponse.model_validate(latest)
 
-
 @router.get("/{station_id}/inflow-outflow")
 def inflow_outflow(station_id: int, hours: int = 24, db: Session = Depends(get_db)):
     """Passenger inflow and outflow analysis."""
     return crowd_service.get_inflow_outflow(db, station_id, hours)
-
 
 @router.get("/{station_id}/analytics")
 def station_analytics(station_id: int, db: Session = Depends(get_db)):

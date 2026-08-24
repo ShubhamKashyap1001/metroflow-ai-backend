@@ -4,6 +4,7 @@ from sqlalchemy import DateTime
 from sqlalchemy import Enum
 from sqlalchemy import ForeignKey
 from sqlalchemy import Float
+from sqlalchemy import Index
 
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -15,10 +16,16 @@ from app.database.base import Base
 from app.enums.journey_status import JourneyStatus
 from app.mixins.timestamp import TimestampMixin
 
-
 class Journey(TimestampMixin, Base):
 
     __tablename__ = "journeys"
+
+    __table_args__ = (
+        Index("ix_journeys_user_id_status", "user_id", "status"),
+        Index("ix_journeys_status_checkin_time", "status", "checkin_time"),
+        Index("ix_journeys_source_station_id_status", "source_station_id", "status"),
+        Index("ix_journeys_destination_station_id_status", "destination_station_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(
         primary_key=True,

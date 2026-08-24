@@ -10,7 +10,6 @@ from app.database.base import Base
 from app.enums.line_status import LineStatus
 from app.mixins.timestamp import TimestampMixin
 
-
 class MetroLine(TimestampMixin, Base):
 
     __tablename__ = "metro_lines"

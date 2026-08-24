@@ -4,7 +4,6 @@ inference time.
 """
 import pandas as pd
 
-
 def add_time_features(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
     if timestamp_col in df.columns:
         ts = pd.to_datetime(df[timestamp_col])

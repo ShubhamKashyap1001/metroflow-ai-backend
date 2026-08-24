@@ -1,11 +1,9 @@
 from pydantic import BaseModel
 from pydantic import ConfigDict
 
-
 class TrainLocationCreate(BaseModel):
     train_id: int
     station_id: int
-
 
 class TrainLocationResponse(BaseModel):
     id: int

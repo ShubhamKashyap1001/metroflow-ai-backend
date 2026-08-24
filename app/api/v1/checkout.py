@@ -14,7 +14,6 @@ router = APIRouter(
     tags=["Check-Out"]
 )
 
-
 @router.post("/", response_model=JourneyResponse)
 def check_out(
     payload: CheckOutRequest,
@@ -26,7 +25,6 @@ def check_out(
         user_id=str(current_user.id),
         journey_id=payload.journey_id,
     )
-
 
 @router.get("/active", response_model=JourneyResponse | None)
 def active_journey(

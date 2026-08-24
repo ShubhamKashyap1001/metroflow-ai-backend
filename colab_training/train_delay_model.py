@@ -29,13 +29,11 @@ MODEL_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(MODEL_DIR, "delay_model.pkl")
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "output", "real_ridership_data.csv")
 
-
 def load_dataset() -> pd.DataFrame:
     if not os.path.exists(DATASET_PATH):
         os.makedirs(os.path.dirname(DATASET_PATH), exist_ok=True)
         save_dataset(DATASET_PATH)
     return pd.read_csv(DATASET_PATH)
-
 
 def train() -> dict:
     df = load_dataset()
@@ -54,7 +52,6 @@ def train() -> dict:
     joblib.dump({"model": model, "features": FEATURES}, MODEL_PATH)
 
     return {"mae": mae, "model_path": MODEL_PATH, "samples": len(df)}
-
 
 if __name__ == "__main__":
     metrics = train()

@@ -1,9 +1,3 @@
-"""State-wise metadata for the frontend's navbar state selector.
-
-Not a data module of its own - just aggregates Station/Train counts
-per state so the UI knows which states have real, seeded data (and
-which ones need more CSV rows before they're worth showing).
-"""
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,7 +14,6 @@ router = APIRouter(
     prefix="/meta",
     tags=["Meta"]
 )
-
 
 @router.get("/states")
 def list_states(db: Session = Depends(get_db)):
@@ -55,7 +48,6 @@ def list_states(db: Session = Depends(get_db)):
         })
 
     return sorted(results, key=lambda r: r["state"])
-
 
 @router.get("/cities")
 def list_cities(db: Session = Depends(get_db)):
@@ -95,7 +87,6 @@ def list_cities(db: Session = Depends(get_db)):
 
     return sorted(results, key=lambda r: r["city"])
 
-
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Great-circle distance in km between two real lat/lng points."""
     r = 6371.0
@@ -104,7 +95,6 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dlambda = math.radians(lng2 - lng1)
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
-
 
 @router.get("/nearest-city")
 def nearest_city(
