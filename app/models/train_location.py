@@ -10,10 +10,10 @@ from sqlalchemy.orm import relationship
 from app.database.base import Base
 from app.mixins.timestamp import TimestampMixin
 
-
 class TrainLocation(TimestampMixin, Base):
 
     __tablename__ = "train_locations"
+                                                                      
     __table_args__ = (UniqueConstraint("train_id", name="uq_train_locations_train_id"),)
 
     id: Mapped[int] = mapped_column(
@@ -28,6 +28,7 @@ class TrainLocation(TimestampMixin, Base):
     station_id: Mapped[int] = mapped_column(
         ForeignKey("stations.id")
     )
+
     next_station_id: Mapped[int | None] = mapped_column(
         ForeignKey("stations.id"),
         nullable=True,
@@ -38,7 +39,6 @@ class TrainLocation(TimestampMixin, Base):
         default=0.0,
     )
 
-    # "in_transit" | "at_station"
     status: Mapped[str] = mapped_column(
         String(20),
         default="in_transit",

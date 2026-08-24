@@ -1,3 +1,14 @@
+"""Seeds a demo metro network: one line, six stations, three trains,
+a day's worth of train schedules (with peak-hour flags), and an
+initial crowd reading per station.
+
+Does NOT create any user/login - Supabase owns sign-up now. After
+seeding, sign up through the frontend (or Supabase dashboard), then
+run `python -m app.database.set_user_role <email> admin` to promote
+your account.
+
+Run directly:  python -m app.database.seed
+"""
 from datetime import time
 
 from app.database.init_db import create_tables
@@ -11,7 +22,6 @@ from app.models.train import Train
 from app.models.train_schedule import TrainSchedule
 from app.simulator.station_generator import DEMO_LINE, DEMO_STATIONS, DEMO_TRAINS
 
-
 def seed() -> None:
     create_tables()
     db = SessionLocal()
@@ -21,12 +31,10 @@ def seed() -> None:
             print("Database already seeded, skipping.")
             return
 
-        # --- Stations ---
         stations = [Station(**data) for data in DEMO_STATIONS]
         db.add_all(stations)
-        db.flush()  # get IDs without committing
+        db.flush()                              
 
-        # --- Metro line + ordered stops ---
         line = MetroLine(**DEMO_LINE)
         db.add(line)
         db.flush()
@@ -39,10 +47,10 @@ def seed() -> None:
                 distance_from_previous=2.5 if order > 1 else 0,
             ))
 
-        # --- Trains ---
         trains = [Train(**data) for data in DEMO_TRAINS]
         db.add_all(trains)
         db.flush()
+
         base_hour = 6
         for t_index, train in enumerate(trains):
             for s_index, station in enumerate(stations):
@@ -62,7 +70,6 @@ def seed() -> None:
                     frequency_minutes=5 if is_peak else 12,
                 ))
 
-        # --- Initial crowd snapshot ---
         for station in stations:
             db.add(CrowdLog(
                 station_id=station.id,
@@ -80,7 +87,6 @@ def seed() -> None:
 
     finally:
         db.close()
-
 
 if __name__ == "__main__":
     seed()

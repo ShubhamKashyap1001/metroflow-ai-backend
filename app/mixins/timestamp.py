@@ -6,7 +6,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 
-
 class TimestampMixin:
     """Adds created_at / updated_at columns, managed by the database."""
 

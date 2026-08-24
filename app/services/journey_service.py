@@ -1,3 +1,4 @@
+
 import math
 import uuid
 from datetime import datetime
@@ -5,16 +6,15 @@ from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.enums.crowd_level import CrowdLevel
 from app.enums.journey_status import JourneyStatus
 from app.models.crowd_log import CrowdLog
 from app.models.journey import Journey
 from app.models.station import Station
-from app.services.crowd_service import get_latest_crowd, log_crowd_count
-from app.schemas.crowd_log import CrowdLogCreate
+from app.services.crowd_service import get_latest_crowd, invalidate_station_cache
 
 BASE_FARE = 10.0
 PER_KM_RATE = 2.0
-
 
 def haversine_km(lat1, lon1, lat2, lon2) -> float:
     r = 6371
@@ -24,15 +24,27 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
     a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
 
+def _stage_crowd_delta(db: Session, station: Station, delta: int) -> None:
+    """Add a CrowdLog row for `station` to the current session (no commit).
 
-def _bump_station_crowd(db: Session, station_id: int, delta: int) -> None:
-    station = db.get(Station, station_id)
-    if not station:
-        return
-    latest = get_latest_crowd(db, station_id)
+    Takes the already-loaded `station` object instead of a bare id, so
+    callers that fetched the station for their own validation (check_in/
+    check_out both already load source/destination) don't pay for a
+    second SELECT just to bump crowd. Only stages the row - the caller
+    commits once, together with whatever else it's writing in the same
+    transaction, and calls invalidate_station_cache() itself right after
+    that commit succeeds (mirrors log_crowd_count(), just without the
+    extra round trip and extra commit for what is really one logical
+    write: "a passenger moved through this station").
+    """
+    latest = get_latest_crowd(db, station.id)
     new_count = max(0, (latest.current_count if latest else 0) + delta)
-    log_crowd_count(db, CrowdLogCreate(station_id=station_id, current_count=new_count))
-
+    ratio = new_count / station.capacity if station.capacity else 0
+    db.add(CrowdLog(
+        station_id=station.id,
+        current_count=new_count,
+        crowd_level=CrowdLevel.from_ratio(ratio),
+    ))
 
 def check_in(db: Session, user_id: str, source_station_id: int, destination_station_id: int) -> Journey:
     source = db.get(Station, source_station_id)
@@ -42,6 +54,10 @@ def check_in(db: Session, user_id: str, source_station_id: int, destination_stat
     if source_station_id == destination_station_id:
         raise HTTPException(status_code=400, detail="Source and destination must differ")
 
+    existing = active_journey_for_user(db, user_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="You already have an active journey - check out first")
+
     journey = Journey(
         user_id=uuid.UUID(str(user_id)),
         source_station_id=source_station_id,
@@ -50,13 +66,13 @@ def check_in(db: Session, user_id: str, source_station_id: int, destination_stat
         status=JourneyStatus.ACTIVE,
     )
     db.add(journey)
+
+    _stage_crowd_delta(db, source, +1)
+
     db.commit()
     db.refresh(journey)
-
-    # Passenger enters the system at the source station.
-    _bump_station_crowd(db, source_station_id, +1)
+    invalidate_station_cache(source)
     return journey
-
 
 def check_out(db: Session, user_id: str, journey_id: int) -> Journey:
     journey = db.get(Journey, journey_id)
@@ -77,19 +93,13 @@ def check_out(db: Session, user_id: str, journey_id: int) -> Journey:
     journey.checkout_time = datetime.utcnow()
     journey.fare = fare
     journey.status = JourneyStatus.COMPLETED
+
+    _stage_crowd_delta(db, source, -1)
+
     db.commit()
     db.refresh(journey)
-
-    # FIX: checkout means the passenger has exited the system entirely
-    # (walked out through the gate) - they should NOT be re-added to
-    # the destination station's live crowd count. The previous version
-    # did `-1` at source and `+1` at destination on every checkout,
-    # which net out to zero system-wide, so the total passenger count
-    # only ever went up (on check-in) and never actually came back
-    # down on checkout. Now checkout is a clean -1 at the source only.
-    _bump_station_crowd(db, journey.source_station_id, -1)
+    invalidate_station_cache(source)
     return journey
-
 
 def active_journey_for_user(db: Session, user_id: str) -> Journey | None:
     return (

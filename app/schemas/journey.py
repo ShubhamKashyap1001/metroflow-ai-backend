@@ -6,19 +6,16 @@ from pydantic import ConfigDict
 
 from app.enums.journey_status import JourneyStatus
 
-
 class JourneyCreate(BaseModel):
     user_id: str
     source_station_id: int
     destination_station_id: int
     checkin_time: datetime
 
-
 class JourneyUpdate(BaseModel):
     checkout_time: datetime | None = None
     fare: float | None = None
     status: JourneyStatus | None = None
-
 
 class JourneyResponse(BaseModel):
     id: int
@@ -33,13 +30,9 @@ class JourneyResponse(BaseModel):
         from_attributes=True
     )
 
-
-# --- Check-in / Check-out request bodies ---
-
 class CheckInRequest(BaseModel):
     source_station_id: int
     destination_station_id: int
-
 
 class CheckOutRequest(BaseModel):
     journey_id: int

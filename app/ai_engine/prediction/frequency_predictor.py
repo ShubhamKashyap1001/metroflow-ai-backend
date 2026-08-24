@@ -1,7 +1,4 @@
-"""Milestone 2 - AI Prediction Module: train frequency recommendation
-inference. Supports the Scheduling Management Module's "frequency
-adjustment" workflow with a data-driven suggestion.
-"""
+import logging
 import os
 from datetime import datetime
 from functools import lru_cache
@@ -9,11 +6,12 @@ from functools import lru_cache
 import joblib
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "frequency_model.pkl")
 
 MIN_FREQUENCY = 3
 MAX_FREQUENCY = 15
-
 
 @lru_cache(maxsize=1)
 def _load_model():
@@ -23,13 +21,9 @@ def _load_model():
     try:
         return joblib.load(MODEL_PATH)
     except Exception as exc:
-        # A version mismatch (scikit-learn/numpy) or a corrupted .pkl
-        # should degrade to the heuristic, not crash every prediction
-        # request - this is what actually made the API keep working
-        # even before/without a valid trained model.
+                                                                     
         print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")
         return None
-
 
 def recommend_frequency(station_id: int, target_datetime: datetime | None = None) -> dict:
     dt = target_datetime or datetime.utcnow()
@@ -39,17 +33,26 @@ def recommend_frequency(station_id: int, target_datetime: datetime | None = None
     is_peak_hour = 1 if (8 <= hour <= 11 or 17 <= hour <= 20) else 0
 
     bundle = _load_model()
+    recommended = None
 
     if bundle is not None:
-        model = bundle["model"]
-        features = pd.DataFrame(
-            [[station_id, hour, day_of_week, is_weekend, is_peak_hour]],
-            columns=bundle["features"],
-        )
-        recommended = float(model.predict(features)[0])
-        model_version = "random_forest_v1"
-    else:
-        # Heuristic: shorter headway during peak hours.
+        try:
+            model = bundle["model"]
+            features = pd.DataFrame(
+                [[station_id, hour, day_of_week, is_weekend, is_peak_hour]],
+                columns=bundle["features"],
+            )
+            recommended = float(model.predict(features)[0])
+            model_version = "random_forest_v1"
+        except Exception as exc:                                                  
+            logger.warning(
+                "frequency model .predict() failed (%r) - using heuristic fallback for this request",
+                exc,
+            )
+            recommended = None
+
+    if recommended is None:
+                                                       
         recommended = MIN_FREQUENCY + 2 if is_peak_hour else MAX_FREQUENCY - 2
         model_version = "heuristic_fallback"
 

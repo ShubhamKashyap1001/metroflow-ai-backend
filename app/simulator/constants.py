@@ -5,6 +5,4 @@ have to import the whole simulator module and its heavier dependencies
 (websocket manager, AI prediction engine, etc).
 """
 
-# Virtual passengers live under this email domain so they're clearly
-# distinguishable from real accounts.
 SIMULATED_EMAIL_DOMAIN = "sim.metroflow.internal"

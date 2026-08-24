@@ -7,7 +7,6 @@ from app.models.station import Station
 from app.schemas.station import StationCreate, StationUpdate
 from app.utils.geo import cities_for_state
 
-
 def _attach_line_info(stations: list[Station]) -> list[Station]:
     """Bolts line_name/line_color/station_order onto each Station
     instance from its metro_lines/line_stations join (see
@@ -21,7 +20,6 @@ def _attach_line_info(stations: list[Station]) -> list[Station]:
         station.station_order = link.station_order if link else None
     return stations
 
-
 def list_stations(db: Session, city: str | None = None, state: str | None = None) -> list[Station]:
     query = db.query(Station).options(
         joinedload(Station.metro_lines).joinedload(LineStation.line)
@@ -34,7 +32,6 @@ def list_stations(db: Session, city: str | None = None, state: str | None = None
     stations = query.order_by(Station.station_name).all()
     return _attach_line_info(stations)
 
-
 def get_station(db: Session, station_id: int) -> Station:
     station = (
         db.query(Station)
@@ -45,7 +42,6 @@ def get_station(db: Session, station_id: int) -> Station:
     if not station:
         raise HTTPException(status_code=404, detail="Station not found")
     return _attach_line_info([station])[0]
-
 
 def create_station(db: Session, payload: StationCreate) -> Station:
     existing = db.query(Station).filter(Station.station_code == payload.station_code).first()
@@ -58,7 +54,6 @@ def create_station(db: Session, payload: StationCreate) -> Station:
     db.refresh(station)
     return station
 
-
 def update_station(db: Session, station_id: int, payload: StationUpdate) -> Station:
     station = get_station(db, station_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -66,7 +61,6 @@ def update_station(db: Session, station_id: int, payload: StationUpdate) -> Stat
     db.commit()
     db.refresh(station)
     return station
-
 
 def delete_station(db: Session, station_id: int) -> None:
     station = get_station(db, station_id)

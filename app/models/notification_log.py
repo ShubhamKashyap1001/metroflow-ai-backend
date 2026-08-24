@@ -21,7 +21,6 @@ from app.enums.notification_channel import NotificationChannel
 from app.enums.notification_status import NotificationStatus
 from app.mixins.timestamp import TimestampMixin
 
-
 class NotificationLog(TimestampMixin, Base):
 
     __tablename__ = "notification_logs"
@@ -37,9 +36,6 @@ class NotificationLog(TimestampMixin, Base):
         default=NotificationChannel.EMAIL,
     )
 
-    # Holds either an email address or a phone number depending on
-    # `channel` - kept as one generic column rather than two nullable
-    # ones so filtering/ordering stays simple.
     recipient: Mapped[str] = mapped_column(
         String(255)
     )

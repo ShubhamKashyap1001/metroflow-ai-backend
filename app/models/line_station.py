@@ -6,7 +6,6 @@ from sqlalchemy.orm import relationship
 
 from app.database.base import Base
 
-
 class LineStation(Base):
 
     __tablename__ = "line_stations"

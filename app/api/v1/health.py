@@ -4,14 +4,15 @@ from datetime import datetime
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from app.core import cache
 from app.core.config import settings
 from app.database.database import engine
+from app.simulator.scheduler import scheduler_status
 
 router = APIRouter(
     prefix="/health",
     tags=["Health"]
 )
-
 
 @router.get("/")
 def health_check():
@@ -27,5 +28,9 @@ def health_check():
         "app_name": settings.APP_NAME,
         "app_version": settings.APP_VERSION,
         "database": db_status,
+                                                                 
+        "scheduler": scheduler_status(),
+                                                                 
+        "redis": cache.redis_status(),
         "timestamp": datetime.utcnow(),
     }

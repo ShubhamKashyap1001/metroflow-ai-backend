@@ -1,6 +1,5 @@
 import enum
 
-
 class TrainStatus(str, enum.Enum):
     ACTIVE = "active"
     IN_SERVICE = "in_service"

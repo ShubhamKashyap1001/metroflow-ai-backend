@@ -8,6 +8,7 @@ from app.models.user_profile import UserProfile
 from app.simulator.scheduler import (
     is_simulator_running,
     is_train_tracker_running,
+    scheduler_status,
     start_simulator,
     start_train_tracker,
     stop_simulator,
@@ -21,8 +22,11 @@ async def simulator_status(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     return {
+                                                                   
         "crowd_simulator_running": is_simulator_running(),
         "train_tracker_running": is_train_tracker_running(),
+                                                                          
+        "detail": scheduler_status(),
     }
 
 @router.post("/simulator/start")
@@ -36,7 +40,7 @@ async def simulator_start(
 async def simulator_stop(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    stop_simulator()
+    await stop_simulator()
     return {"crowd_simulator_running": is_simulator_running()}
 
 @router.post("/train-tracker/start")
@@ -50,5 +54,5 @@ async def train_tracker_start(
 async def train_tracker_stop(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    stop_train_tracker()
+    await stop_train_tracker()
     return {"train_tracker_running": is_train_tracker_running()}

@@ -14,7 +14,6 @@ from app.database.base import Base
 from app.enums.prediction_type import PredictionType
 from app.mixins.timestamp import TimestampMixin
 
-
 class Prediction(TimestampMixin, Base):
 
     __tablename__ = "predictions"
@@ -24,6 +23,7 @@ class Prediction(TimestampMixin, Base):
     station_id: Mapped[int] = mapped_column(
         ForeignKey("stations.id")
     )
+
     predicted_count: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True
@@ -33,7 +33,6 @@ class Prediction(TimestampMixin, Base):
         Float,
         default=0
     )
-
 
     prediction_type: Mapped[PredictionType] = mapped_column(
         Enum(PredictionType),

@@ -13,8 +13,9 @@ dataset the platform spec calls for).
 """
 import asyncio
 import random
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -32,15 +33,35 @@ from app.websocket.manager import manager
 
 from app.simulator.constants import SIMULATED_EMAIL_DOMAIN
 
-# Assumed average train+walk speed, for turning a source/destination
-# distance into a plausible "still travelling" checkout delay.
 ASSUMED_SPEED_KMPH = 35
 MIN_TRIP_MINUTES = 4
 
+_stations_cache: list[dict] | None = None
+_stations_cache_at: float = 0.0
+_STATIONS_CACHE_TTL_SECONDS = 600
+
+def _load_stations(db: Session) -> list[dict]:
+    global _stations_cache, _stations_cache_at
+    now = time.monotonic()
+    if _stations_cache is not None and (now - _stations_cache_at) < _STATIONS_CACHE_TTL_SECONDS:
+        return _stations_cache
+
+    rows = db.query(Station).filter(Station.is_active.is_(True)).all()
+    _stations_cache = [
+        {
+            "id": s.id,
+            "station_name": s.station_name,
+            "latitude": s.latitude,
+            "longitude": s.longitude,
+            "capacity": s.capacity,
+        }
+        for s in rows
+    ]
+    _stations_cache_at = now
+    return _stations_cache
 
 def _simulated_email(index: int) -> str:
     return f"passenger-{index:03d}@{SIMULATED_EMAIL_DOMAIN}"
-
 
 def ensure_simulated_passengers(db: Session) -> list[UserProfile]:
     """Idempotently creates (or loads) the virtual passenger pool.
@@ -75,16 +96,16 @@ def ensure_simulated_passengers(db: Session) -> list[UserProfile]:
 
     return passengers
 
-
-def _expected_travel_minutes(db: Session, journey: Journey) -> float:
-    source = db.get(Station, journey.source_station_id)
-    destination = db.get(Station, journey.destination_station_id)
+def _expected_travel_minutes(journey: Journey, stations_by_id: dict[int, dict]) -> float:
+    source = stations_by_id.get(journey.source_station_id)
+    destination = stations_by_id.get(journey.destination_station_id)
+    if not source or not destination:
+        return MIN_TRIP_MINUTES
     distance_km = journey_service.haversine_km(
-        source.latitude, source.longitude,
-        destination.latitude, destination.longitude,
+        source["latitude"], source["longitude"],
+        destination["latitude"], destination["longitude"],
     )
     return max(MIN_TRIP_MINUTES, (distance_km / ASSUMED_SPEED_KMPH) * 60)
-
 
 def _simulate_tick_sync(db: Session) -> list[dict]:
     """All the actual DB/CPU work for one tick, as a plain sync
@@ -96,9 +117,9 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
     adjacent requests like /auth/me) for the duration of each tick."""
     passengers = ensure_simulated_passengers(db)
     changed_station_ids: set[int] = set()
+    stations = _load_stations(db)
+    stations_by_id = {s["id"]: s for s in stations}
 
-    # --- Check out virtual passengers who've had enough time to
-    # travel from source to destination. ---
     active_journeys = (
         db.query(Journey)
         .filter(
@@ -108,14 +129,12 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
         .all()
     )
     for journey in active_journeys:
-        elapsed_minutes = (datetime.now(timezone.utc) - journey.checkin_time).total_seconds() / 60
-        if elapsed_minutes >= _expected_travel_minutes(db, journey):
+        elapsed_minutes = (datetime.utcnow() - journey.checkin_time).total_seconds() / 60
+        if elapsed_minutes >= _expected_travel_minutes(journey, stations_by_id):
             journey_service.check_out(db, user_id=str(journey.user_id), journey_id=journey.id)
             changed_station_ids.add(journey.source_station_id)
             changed_station_ids.add(journey.destination_station_id)
 
-    # --- Check in a handful of new virtual passengers. ---
-    stations = db.query(Station).filter(Station.is_active.is_(True)).all()
     if len(stations) >= 2:
         still_active_user_ids = {
             row[0]
@@ -128,11 +147,9 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
         }
         idle_passengers = [p for p in passengers if p.id not in still_active_user_ids]
 
-        # Weight source stations by the AI crowd model's own prediction,
-        # so busier-predicted stations realistically get more check-ins.
         weights = []
         for station in stations:
-            prediction = predict_crowd(station.id, datetime.utcnow(), light=True)
+            prediction = predict_crowd(station["id"], datetime.utcnow(), light=True)
             weights.append(max(1.0, prediction["predicted_count"]))
 
         num_checkins = min(
@@ -143,34 +160,33 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
 
         for passenger in chosen_passengers:
             source, destination = random.choices(stations, weights=weights, k=2)
-            if source.id == destination.id:
+            if source["id"] == destination["id"]:
                 continue
             journey_service.check_in(
                 db,
                 user_id=str(passenger.id),
-                source_station_id=source.id,
-                destination_station_id=destination.id,
+                source_station_id=source["id"],
+                destination_station_id=destination["id"],
             )
-            changed_station_ids.add(source.id)
+            changed_station_ids.add(source["id"])
 
     if not changed_station_ids:
         return []
 
     updates = []
     for station_id in changed_station_ids:
-        station = db.get(Station, station_id)
+        station = stations_by_id.get(station_id)
         latest = get_latest_crowd(db, station_id)
         if not station or not latest:
             continue
         updates.append({
-            "station_id": station.id,
-            "station_name": station.station_name,
+            "station_id": station_id,
+            "station_name": station["station_name"],
             "current_count": latest.current_count,
             "crowd_level": latest.crowd_level,
         })
 
     return updates
-
 
 async def simulate_tick(db: Session) -> list[dict]:
     """Runs the sync tick body on a worker thread (so it never blocks
@@ -183,7 +199,6 @@ async def simulate_tick(db: Session) -> list[dict]:
         await manager.broadcast(CROWD_UPDATE, {"updates": updates, "timestamp": datetime.utcnow().isoformat()})
     return updates
 
-
 async def run_forever(session_factory, interval_seconds: int = 30) -> None:
     """Background loop: call once at startup with
     `asyncio.create_task(run_forever(SessionLocal))`.
@@ -192,7 +207,7 @@ async def run_forever(session_factory, interval_seconds: int = 30) -> None:
         db = session_factory()
         try:
             await simulate_tick(db)
-        except Exception as exc:  # noqa: BLE001 - never let one bad tick kill the loop
+        except Exception as exc:                                                       
             print(f"[simulator] tick failed, will retry next interval: {exc}")
         finally:
             db.close()

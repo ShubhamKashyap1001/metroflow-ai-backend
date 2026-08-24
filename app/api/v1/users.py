@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user, require_roles
+from app.core.security import get_current_user, invalidate_user_cache, require_roles
 from app.database.session import get_db
 from app.enums.user_role import UserRole
 from app.models.user_profile import UserProfile
@@ -15,7 +15,6 @@ router = APIRouter(
     prefix="/users",
     tags=["Users"]
 )
-
 
 @router.get("/", response_model=list[UserProfileResponse])
 def get_users(
@@ -31,7 +30,6 @@ def get_users(
         .all()
     )
 
-
 @router.get("/{user_id}", response_model=UserProfileResponse)
 def get_user(
     user_id: UUID,
@@ -42,7 +40,6 @@ def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
-
 
 @router.put("/{user_id}", response_model=UserProfileResponse)
 def update_user(
@@ -60,7 +57,6 @@ def update_user(
 
     update_data = payload.model_dump(exclude_unset=True)
 
-    # Only admins may change role / is_active
     if current_user.role != UserRole.ADMIN:
         update_data.pop("role", None)
         update_data.pop("is_active", None)
@@ -70,4 +66,6 @@ def update_user(
 
     db.commit()
     db.refresh(user)
+                                                                
+    invalidate_user_cache(user.id)
     return user

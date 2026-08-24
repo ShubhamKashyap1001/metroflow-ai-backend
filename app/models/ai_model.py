@@ -7,7 +7,6 @@ from sqlalchemy.orm import mapped_column
 from app.database.base import Base
 from app.mixins.timestamp import TimestampMixin
 
-
 class AIModel(TimestampMixin, Base):
 
     __tablename__ = "ai_models"

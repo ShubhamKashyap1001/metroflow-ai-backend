@@ -1,11 +1,16 @@
+"""SMTP email dispatch for the Alert & Notification Module.
 
+Uses a generic SMTP connection - works with Gmail (App Password),
+SendGrid SMTP relay, Mailgun, AWS SES SMTP, etc. No third-party SDK
+needed since smtplib/email are part of the Python standard library,
+so nothing new to add to requirements.txt.
+"""
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from app.core.config import settings
-
 
 def _build_alert_email(
     station_name: str,
@@ -67,7 +72,6 @@ def _build_alert_email(
     msg.attach(MIMEText(html, "html"))
     return msg
 
-
 def send_alert_emails(
     recipients: list[str],
     station_name: str,
@@ -119,15 +123,7 @@ def send_alert_emails(
 
         for recipient in recipients:
             try:
-                # IMPORTANT: `email_msg["To"] = recipient` on a stdlib
-                # email.message.Message APPENDS a header, it does not
-                # replace it. Reusing the same msg object across the
-                # loop without clearing the previous "To" first meant
-                # every send after the first one carried multiple "To"
-                # headers, which Gmail/most servers reject outright as
-                # not RFC 5322 compliant - and that rejection then
-                # drops the live connection, so everyone after that
-                # failed too. Clearing it each iteration fixes both.
+                                                                      
                 del email_msg["To"]
                 email_msg["To"] = recipient
 
@@ -136,9 +132,7 @@ def send_alert_emails(
                         settings.SMTP_FROM_EMAIL, recipient, email_msg.as_string()
                     )
                 except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError):
-                    # The connection was dropped (e.g. by a previous
-                    # rejected send) - reconnect once and retry this
-                    # recipient before giving up on them.
+                                                                    
                     try:
                         server.quit()
                     except Exception:
@@ -153,8 +147,7 @@ def send_alert_emails(
                 results[recipient] = f"failed: {exc}"
 
     except Exception as exc:
-        # Connection/login itself failed - every recipient we haven't
-        # already marked is a failure for the same reason.
+                                                                     
         for recipient in recipients:
             if recipient not in results:
                 results[recipient] = f"failed: {exc}"

@@ -20,21 +20,15 @@ from app.database.base import Base
 from app.enums.user_role import UserRole
 from app.mixins.timestamp import TimestampMixin
 
-
 class UserProfile(TimestampMixin, Base):
 
     __tablename__ = "user_profiles"
 
-    # Same UUID as the corresponding row in Supabase's auth.users table.
-    # No local default - this is always set explicitly to that id.
     id: Mapped[str] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True
     )
 
-    # Cached copy of the Supabase account email, kept in sync on each
-    # login for convenience (e.g. admin listing users). Not used for
-    # authentication - Supabase is the source of truth.
     email: Mapped[str | None] = mapped_column(
         String(255),
         unique=True,
@@ -46,11 +40,6 @@ class UserProfile(TimestampMixin, Base):
         nullable=False
     )
 
-    # Optional, set at signup - purely a display handle (not used for
-    # login; Supabase auth is always by email, phone, or Google). Not
-    # enforced unique at the DB level on purpose: two people picking
-    # the same handle shouldn't block either of their signups from
-    # completing - this is a profile label, not a login credential.
     username: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True
