@@ -11,3 +11,6 @@ from app.models.prediction import Prediction
 from app.models.alert import Alert
 from app.models.ai_model import AIModel
 from app.models.notification_log import NotificationLog
+from app.models.notification import Notification
+from app.models.enquiry import Enquiry
+from app.models.news import News

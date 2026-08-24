@@ -1,3 +1,10 @@
+"""Analytics endpoints. Traffic analysis reports (Milestone 2) plus
+station performance / operational monitoring / AI insight groundwork
+for the full Milestone 3 Analytics Dashboard Module. Every route now
+requires a logged-in user and is rate-limited (20/minute per IP),
+same treatment as app/api/v1/prediction.py - these aggregate over the
+whole dataset and shouldn't be open to anonymous/unlimited traffic.
+"""
 from fastapi import APIRouter, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_ipaddr

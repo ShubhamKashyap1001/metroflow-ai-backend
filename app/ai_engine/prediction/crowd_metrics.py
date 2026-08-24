@@ -1,4 +1,36 @@
+"""New (real-data) module - live evaluation metrics for the production
+crowd/demand prediction model.
 
+Powers the crowd/demand section of the "AI Prediction" dashboard page.
+The crowd model and the demand model are the SAME trained artifact in
+this codebase (see prediction_service.forecast_demand, which just calls
+predict_crowd() repeatedly for future hours) - a RandomForestRegressor
+predicting passenger_count for a station/hour slot. Everything below is
+computed from the REAL datasets/passenger_flow.csv + datasets/stations.csv
+and the REAL trained crowd_model.pkl - nothing is hardcoded.
+
+Design notes:
+- Rebuilds the exact same (station_id, hour, day_of_week, is_weekend,
+  is_peak_hour) -> passenger_count training table that
+  colab_training/train_crowd_model.py builds via _real_dataset_builder.py
+  (duplicated here rather than imported, since colab_training/ is
+  intentionally standalone with no `app` package dependency), then
+  re-creates its
+  train_test_split(test_size=0.2, random_state=42) to get the identical
+  held-out test rows.
+- The model itself only predicts a passenger COUNT, not a crowd-level
+  class, so "accuracy" / "Macro-F1" / confusion matrix are computed by
+  converting counts into the app's own CrowdLevel buckets
+  (app/enums/crowd_level.py: low/moderate/high/critical via occupancy
+  ratio, thresholds 0.4/0.7/0.9). The dataset has no per-station real
+  capacity figure, so an implied network-wide capacity is derived from
+  the real crowding_index column already in passenger_flow.csv
+  (capacity = passenger_count / crowding_index, median across rows) -
+  the SAME implied capacity is used to bucket both actual and predicted
+  counts, so the comparison stays apples-to-apples.
+- Cached for the life of the process - the dataset/model are static
+  files, so recomputing on every 30s poll would be wasted CPU.
+"""
 import os
 from functools import lru_cache
 

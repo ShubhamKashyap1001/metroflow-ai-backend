@@ -9,12 +9,14 @@ from app.core.email import send_alert_emails
 from app.core.sms import send_alert_sms
 from app.database.session import SessionLocal
 from app.enums.notification_channel import NotificationChannel
+from app.enums.notification_source import NotificationSource
 from app.enums.notification_status import NotificationStatus
 from app.models.alert import Alert
 from app.models.notification_log import NotificationLog
 from app.models.station import Station
 from app.models.user_profile import UserProfile
 from app.schemas.alert import AlertCreate
+from app.services import notification_service
 from app.simulator.constants import SIMULATED_EMAIL_DOMAIN
 from app.utils.geo import cities_for_state
 from app.websocket.events import STATION_ALERT
@@ -64,6 +66,16 @@ def create_alert(db: Session, payload: AlertCreate, created_by: str | None = Non
 
     _broadcast_alert(db, alert, resolved=False)
 
+    station = db.get(Station, alert.station_id)
+    station_name = station.station_name if station else f"Station #{alert.station_id}"
+    notification_service.create_notification(
+        db,
+        source=NotificationSource.OPERATOR,
+        title=f"{alert.alert_type.value.title()} alert - {station_name}",
+        message=alert.message,
+        related_alert_id=alert.id,
+    )
+
     return alert
 
 def get_alert(db: Session, alert_id: int) -> Alert:
@@ -97,6 +109,18 @@ def _log_results(db: Session, alert_id: int, channel: NotificationChannel, resul
             )
         )
     db.commit()
+
+    if channel == NotificationChannel.EMAIL:
+        sent_count = sum(1 for outcome in results.values() if outcome == "sent")
+        if sent_count:
+                                                                    
+            notification_service.create_notification(
+                db,
+                source=NotificationSource.EMAIL,
+                title="Email notifications sent",
+                message=f"Email notification sent to {sent_count} recipient(s) for alert #{alert_id}.",
+                related_alert_id=alert_id,
+            )
 
 def _dispatch(
     alert_id: int,

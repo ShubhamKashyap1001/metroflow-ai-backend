@@ -1,3 +1,26 @@
+"""Milestone 2 - AI Prediction Module: delay prediction inference.
+
+Supports the 8-feature delay_model.pkl (adds capacity_passengers and
+train_age_days on top of the original 6). Both are sourced from real
+data, never invented:
+
+  capacity_passengers -> Train.capacity, a real per-train DB column
+                          seeded straight from trains.csv's
+                          capacity_passengers (2nd-generation dataset:
+                          real values from 974-1284, not a uniform
+                          guess). If a specific train_id is given,
+                          that train's own capacity is used;
+                          otherwise the real average across active
+                          trains is used.
+
+  train_age_days       -> Train.commissioned_date, a real per-train DB
+                          column seeded straight from trains.csv's
+                          commissioned_date. train_age_days =
+                          (today - commissioned_date).days. This
+                          dataset generation has no separate sensor
+                          CSV, so this is now a direct DB read, not an
+                          estimate from a replay cache.
+"""
 import logging
 import os
 from datetime import date, datetime

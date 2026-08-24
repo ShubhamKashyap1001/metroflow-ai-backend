@@ -12,9 +12,13 @@ Two ways to push an event:
 """
 import asyncio
 import json
+import logging
 
 from fastapi import WebSocket
 
+logger = logging.getLogger(__name__)
+
+SEND_TIMEOUT_SECONDS = 5
 
 class ConnectionManager:
     def __init__(self):
@@ -34,16 +38,35 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    async def _send_one(self, connection: WebSocket, payload: str) -> WebSocket | None:
+        """Send to a single connection with a timeout. Returns the
+        connection if it should be dropped (send failed or timed out),
+        else None - so the caller can remove dead connections in one
+        pass after every send has been attempted."""
+        try:
+            await asyncio.wait_for(connection.send_text(payload), timeout=SEND_TIMEOUT_SECONDS)
+            return None
+        except asyncio.TimeoutError:
+            logger.warning("[websocket] send timed out after %ss - dropping stale connection.",
+                            SEND_TIMEOUT_SECONDS)
+            return connection
+        except Exception:
+                                                                     
+            return connection
+
     async def broadcast(self, event: str, data: dict) -> None:
         if not self.active_connections:
             return
         payload = json.dumps({"event": event, "data": data}, default=str)
-        stale = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(payload)
-            except Exception:
-                stale.append(connection)
+
+        connections = list(self.active_connections)
+
+        results = await asyncio.gather(
+            *(self._send_one(connection, payload) for connection in connections),
+            return_exceptions=False,
+        )
+
+        stale = [connection for connection in results if connection is not None]
         for connection in stale:
             self.disconnect(connection)
 
@@ -57,8 +80,7 @@ class ConnectionManager:
         try:
             asyncio.run_coroutine_threadsafe(self.broadcast(event, data), self._loop)
         except RuntimeError:
-            # Loop already closed (e.g. shutting down) - safe to drop.
+                                                                      
             pass
-
 
 manager = ConnectionManager()
