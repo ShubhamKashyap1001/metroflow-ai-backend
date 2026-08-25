@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/stations?city=Kolkata"
+method: GET
+queryParams:
+  city: Kolkata
+auth:
+  type: noauth
+order: 2000

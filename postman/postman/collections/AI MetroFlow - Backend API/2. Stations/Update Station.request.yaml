@@ -1,0 +1,12 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/stations/1"
+method: PUT
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "capacity": 6000
+    }
+order: 6000

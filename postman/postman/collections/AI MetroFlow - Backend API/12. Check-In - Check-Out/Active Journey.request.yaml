@@ -1,0 +1,4 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/checkout/active"
+method: GET
+order: 3000

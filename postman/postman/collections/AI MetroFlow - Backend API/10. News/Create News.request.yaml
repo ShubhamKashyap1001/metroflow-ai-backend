@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/news"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "title": "New Route Opened",
+      "content": "The Purple Line extension is now open."
+    }
+order: 3000

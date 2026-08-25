@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/notifications?unread_only=true"
+method: GET
+queryParams:
+  unread_only: "true"
+order: 8000

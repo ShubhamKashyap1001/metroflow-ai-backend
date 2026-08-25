@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/enquiries?status=open"
+method: GET
+queryParams:
+  status: open
+order: 2000

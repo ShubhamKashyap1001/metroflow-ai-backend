@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "train_number": "TST-01",
+      "capacity": 300
+    }
+order: 7000

@@ -1,0 +1,14 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/enquiries"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "subject": "Lost item on train",
+      "category": "lost_and_found",
+      "message": "I left my bag on TRN-BL-01 this morning."
+    }
+order: 3000

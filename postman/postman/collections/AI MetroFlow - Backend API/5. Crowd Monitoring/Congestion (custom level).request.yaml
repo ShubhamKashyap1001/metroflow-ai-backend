@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/crowd/congestion?min_level=critical"
+method: GET
+queryParams:
+  min_level: critical
+auth:
+  type: noauth
+order: 7000

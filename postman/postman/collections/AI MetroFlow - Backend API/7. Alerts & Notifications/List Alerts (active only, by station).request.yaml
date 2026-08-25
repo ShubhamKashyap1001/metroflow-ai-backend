@@ -1,0 +1,7 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/alerts?station_id=1&active_only=true"
+method: GET
+queryParams:
+  station_id: "1"
+  active_only: "true"
+order: 2000

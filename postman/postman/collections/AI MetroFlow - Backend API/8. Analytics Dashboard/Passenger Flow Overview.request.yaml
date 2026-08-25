@@ -1,0 +1,7 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/analytics/passenger-flow-overview?hours=24&top_n=8"
+method: GET
+queryParams:
+  hours: "24"
+  top_n: "8"
+order: 4000

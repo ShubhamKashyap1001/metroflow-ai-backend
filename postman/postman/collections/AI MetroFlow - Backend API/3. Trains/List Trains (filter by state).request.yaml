@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains?state=West Bengal"
+method: GET
+queryParams:
+  state: West Bengal
+auth:
+  type: noauth
+order: 2000

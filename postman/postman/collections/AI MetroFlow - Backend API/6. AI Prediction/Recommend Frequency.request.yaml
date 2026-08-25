@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/predictions/frequency"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_id": 1,
+      "is_peak_hour": true
+    }
+order: 5000

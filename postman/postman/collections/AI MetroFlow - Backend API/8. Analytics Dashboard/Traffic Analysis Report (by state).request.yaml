@@ -1,0 +1,7 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/analytics/traffic-report?hours=24&state=Delhi"
+method: GET
+queryParams:
+  hours: "24"
+  state: Delhi
+order: 2000

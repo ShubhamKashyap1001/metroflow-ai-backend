@@ -1,0 +1,7 @@
+$kind: http-request
+name: Congestion (>= HIGH)
+url: "{{base_url}}/api/v1/crowd/congestion"
+method: GET
+auth:
+  type: noauth
+order: 6000

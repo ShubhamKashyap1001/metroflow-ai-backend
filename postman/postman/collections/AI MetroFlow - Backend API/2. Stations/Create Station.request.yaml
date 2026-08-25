@@ -1,0 +1,18 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/stations"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_code": "TST01",
+      "station_name": "Test Station",
+      "city": "Kolkata",
+      "latitude": 22.5726,
+      "longitude": 88.3639,
+      "is_interchange": false,
+      "capacity": 5000
+    }
+order: 5000

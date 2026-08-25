@@ -1,0 +1,12 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/checkout"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "journey_id": 1
+    }
+order: 2000

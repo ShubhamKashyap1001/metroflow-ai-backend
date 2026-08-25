@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains/live?state=Kolkata"
+method: GET
+queryParams:
+  state: Kolkata
+auth:
+  type: noauth
+order: 4000

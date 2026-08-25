@@ -1,0 +1,7 @@
+$kind: http-request
+name: Get News Feed (include inactive, admin/operator)
+url: "{{base_url}}/api/v1/news?include_inactive=true"
+method: GET
+queryParams:
+  include_inactive: "true"
+order: 2000

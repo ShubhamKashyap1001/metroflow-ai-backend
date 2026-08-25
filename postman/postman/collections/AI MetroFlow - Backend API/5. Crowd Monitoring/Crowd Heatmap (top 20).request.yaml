@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/crowd/heatmap?limit=20"
+method: GET
+queryParams:
+  limit: "20"
+auth:
+  type: noauth
+order: 5000

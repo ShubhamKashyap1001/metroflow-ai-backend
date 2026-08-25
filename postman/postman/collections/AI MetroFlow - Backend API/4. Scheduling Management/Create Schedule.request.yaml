@@ -1,0 +1,19 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/schedules"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "train_id": 1,
+      "station_id": 1,
+      "arrival_time": "08:00:00",
+      "departure_time": "08:02:00",
+      "platform_number": 1,
+      "day_type": "weekday",
+      "is_peak_hour": false,
+      "frequency_minutes": 10
+    }
+order: 6000

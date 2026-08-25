@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/analytics/prediction-insights?limit=20"
+method: GET
+queryParams:
+  limit: "20"
+order: 5000

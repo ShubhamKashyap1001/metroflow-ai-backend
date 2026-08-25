@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/schedules/1/frequency"
+method: PATCH
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "frequency_minutes": 5,
+      "is_peak_hour": true
+    }
+order: 9000

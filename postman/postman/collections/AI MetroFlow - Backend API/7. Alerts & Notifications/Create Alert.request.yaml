@@ -1,0 +1,16 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/alerts"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_id": 1,
+      "alert_type": "overcrowding",
+      "message": "Platform 2 is overcrowded",
+      "notify_email": true,
+      "notify_sms": true
+    }
+order: 3000

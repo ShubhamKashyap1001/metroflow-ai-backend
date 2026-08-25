@@ -1,0 +1,15 @@
+$kind: collection
+description: |-
+  Full API collection for MetroFlow (metro-b-final backend). Covers all 17 route modules: Health, Auth, Stations, Trains, Scheduling, Crowd Monitoring, AI Prediction, Alerts & Notifications, Analytics, Meta, News, Enquiries, Check-in/Check-out, Users, and Admin.
+
+  SETUP:
+  1. Import the companion environment file (AI MetroFlow - Local.postman_environment.json).
+  2. Fill in base_url, supabase_url, supabase_anon_key, supabase_email, supabase_password.
+  3. Run '0. Auth (Supabase login) > Login' once - it auto-saves your access_token.
+  4. Every other request uses {{access_token}} as its Bearer token automatically (collection-level auth), except the ones explicitly marked No Auth (public routes).
+auth:
+  - id: 21e57316-b378-4102-8055-1c9f3d2d7f59
+    type: bearer
+    name: bearer auth
+    credentials:
+      token: "{{access_token}}"

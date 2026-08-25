@@ -1,0 +1,3 @@
+$kind: collection
+description: Run 'Login' first. Auth itself is handled entirely by Supabase - this backend only verifies the JWT.
+order: 1000

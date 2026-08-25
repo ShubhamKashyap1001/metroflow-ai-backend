@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/users/00000000-0000-0000-0000-000000000000"
+method: PUT
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "full_name": "Updated Name",
+      "phone": "+91-9800000000"
+    }
+order: 3000
