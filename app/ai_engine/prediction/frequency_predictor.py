@@ -1,3 +1,7 @@
+"""Milestone 2 - AI Prediction Module: train frequency recommendation
+inference. Supports the Scheduling Management Module's "frequency
+adjustment" workflow with a data-driven suggestion.
+"""
 import logging
 import os
 from datetime import datetime

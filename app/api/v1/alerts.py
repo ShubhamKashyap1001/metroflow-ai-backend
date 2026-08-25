@@ -1,3 +1,20 @@
+"""Alert & Notification Module. Overcrowding / delay / emergency /
+maintenance / info alerts, raised by admins and operators, station-wise
+filterable, with a resolve workflow. Every alert now also dispatches
+an email + SMS (in the background, so the API responds instantly) to
+every active user with an email/phone on file, plus an explicit copy
+to whoever raised it - see app/core/email.py, app/core/sms.py and
+app/services/alert_service.py.
+
+Two extra behaviours on top of that:
+  - AlertCreate accepts an optional `available_until` ("service
+    expected back by 9:00 PM") that's included in the dispatched
+    email/SMS and shown on the alert card.
+  - Resolving an alert (PATCH /{id}/resolve) re-notifies the same
+    audience, on the same channel(s) it was originally raised on, that
+    the issue is now resolved - unless the caller explicitly opts out
+    with notify_on_resolve=false.
+"""
 from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 

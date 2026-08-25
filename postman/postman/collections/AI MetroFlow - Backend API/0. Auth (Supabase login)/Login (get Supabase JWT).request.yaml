@@ -1,0 +1,30 @@
+$kind: http-request
+description: Logs in directly against Supabase Auth (NOT this backend - MetroFlow's backend has no /login endpoint on purpose, see app/api/v1/authentication.py). Set supabase_url, supabase_anon_key, supabase_email, supabase_password in the environment first. Run this once - the Tests script auto-saves the returned access_token into {{access_token}}, which every other request in this collection uses as its Bearer token.
+url: "{{supabase_url}}/auth/v1/token?grant_type=password"
+method: POST
+headers:
+  Content-Type: application/json
+  apikey: "{{supabase_anon_key}}"
+queryParams:
+  grant_type: password
+body:
+  type: json
+  content: |-
+    {
+      "email": "{{supabase_email}}",
+      "password": "{{supabase_password}}"
+    }
+auth:
+  type: noauth
+scripts:
+  - type: afterResponse
+    code: |-
+      const data = pm.response.json();
+      if (data.access_token) {
+          pm.environment.set('access_token', data.access_token);
+          console.log('access_token saved to environment.');
+      } else {
+          console.error('Login failed:', JSON.stringify(data));
+      }
+    language: text/javascript
+order: 1000

@@ -1,0 +1,15 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/crowd"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_id": 1,
+      "current_count": 120
+    }
+auth:
+  type: noauth
+order: 1000

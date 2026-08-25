@@ -1,0 +1,9 @@
+$kind: http-request
+name: Inflow/Outflow
+url: "{{base_url}}/api/v1/crowd/1/inflow-outflow?hours=24"
+method: GET
+queryParams:
+  hours: "24"
+auth:
+  type: noauth
+order: 9000

@@ -1,3 +1,10 @@
+"""Milestone 2 - Scheduling Management Module API.
+
+Train schedule management, peak-hour optimization, frequency
+adjustment, delay handling. (`app/api/v1/schedules.py` is an older,
+Supabase-based file kept for reference but not wired into the app -
+see app/main.py.)
+"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 

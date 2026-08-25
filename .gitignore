@@ -10,6 +10,10 @@ __pycache__/
 # C extensions
 *.so
 
+
+#postman
+postman/AI_MetroFlow_Local.postman_environment.json
+
 # Distribution / packaging
 .Python
 build/
@@ -173,4 +177,6 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
-# End of https://www.toptal.com/developers/gitignore/api/python
+
+
+postman/AI_MetroFlow_Local.postman_environment.json

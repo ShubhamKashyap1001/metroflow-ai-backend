@@ -1,0 +1,4 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/predictions/traffic-pattern-aggregate/all"
+method: GET
+order: 7000

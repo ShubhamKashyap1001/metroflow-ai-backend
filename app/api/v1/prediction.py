@@ -1,3 +1,11 @@
+"""Milestone 2 - AI Prediction Module API.
+
+Crowd prediction models, passenger demand forecasting, traffic
+pattern analysis, smart recommendations. Every route requires a
+logged-in user and is rate-limited (20/minute per IP) since these all
+run an ML model - unauthenticated/unlimited access to compute-heavy
+endpoints is an easy way to overload the server.
+"""
 from fastapi import APIRouter, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_ipaddr

@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/checkin"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "source_station_id": 1,
+      "destination_station_id": 5
+    }
+order: 1000

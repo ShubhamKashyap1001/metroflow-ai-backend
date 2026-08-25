@@ -20,8 +20,11 @@ from app.api.v1 import (
     checkin,
     checkout,
     crowd,
+    enquiries,
     health,
     meta,
+    news,
+    notifications,
     prediction,
     schedule,
     station,
@@ -30,6 +33,8 @@ from app.api.v1 import (
 )
 from app.core.config import settings
 from app.database.session import SessionLocal
+from app.enums.notification_source import NotificationSource
+from app.services import notification_service
 from app.simulator.scheduler import (
     start_simulator,
     start_train_tracker,
@@ -77,6 +82,24 @@ async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
     existing retry logic already knows how to handle."""
     logger.error("[db] connection pool exhausted on %s - consider raising DB_POOL_SIZE/DB_MAX_OVERFLOW "
                   "or checking for a slow query/unreachable DB.", request.url.path)
+
+    try:
+                                                                    
+        notif_db = SessionLocal()
+        try:
+            notification_service.create_notification(
+                notif_db,
+                source=NotificationSource.SYSTEM_FAILURE,
+                title="Database connection pool exhausted",
+                message=f"No free DB connection within the pool timeout on {request.url.path}. "
+                        "Consider raising DB_POOL_SIZE/DB_MAX_OVERFLOW or checking for a slow query.",
+            )
+        finally:
+            notif_db.close()
+    except Exception:
+                                                                     
+        pass
+
     return JSONResponse(
         status_code=503,
         content={"detail": "Server is busy, please try again in a moment."},
@@ -105,6 +128,9 @@ app.include_router(schedule.router, prefix=API_PREFIX)
 app.include_router(prediction.router, prefix=API_PREFIX)
 app.include_router(analytics.router, prefix=API_PREFIX)
 app.include_router(alerts.router, prefix=API_PREFIX)
+app.include_router(enquiries.router, prefix=API_PREFIX)
+app.include_router(news.router, prefix=API_PREFIX)
+app.include_router(notifications.router, prefix=API_PREFIX)
 app.include_router(meta.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 

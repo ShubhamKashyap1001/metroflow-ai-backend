@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/enquiries/1/resolve"
+method: PATCH
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "admin_reply": "Your bag has been found at Lost & Found, MG Road station.",
+      "status": "resolved"
+    }
+order: 5000

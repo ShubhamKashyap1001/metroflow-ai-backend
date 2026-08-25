@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains/live"
+method: GET
+auth:
+  type: noauth
+order: 3000

@@ -1,0 +1,4 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/admin/train-tracker/stop"
+method: POST
+order: 5000

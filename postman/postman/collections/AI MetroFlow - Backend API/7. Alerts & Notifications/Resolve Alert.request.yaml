@@ -1,0 +1,12 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/alerts/1/resolve"
+method: PATCH
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "notify_on_resolve": true
+    }
+order: 5000

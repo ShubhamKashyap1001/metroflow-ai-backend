@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains/1"
+method: PUT
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "capacity": 350,
+      "status": "active"
+    }
+order: 8000

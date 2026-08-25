@@ -1,0 +1,8 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/crowd/dashboard?state=Maharashtra"
+method: GET
+queryParams:
+  state: Maharashtra
+auth:
+  type: noauth
+order: 3000

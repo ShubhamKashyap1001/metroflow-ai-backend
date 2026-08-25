@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/schedules/1/delay"
+method: PATCH
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "delay_minutes": 5,
+      "reason": "signal failure"
+    }
+order: 8000

@@ -1,3 +1,8 @@
+"""Milestone 1 - Crowd Monitoring Module.
+
+Fixed: previously imported a non-existent `database.supabase` client and
+had no request validation. Now backed by SQLAlchemy + crowd_service.
+"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 

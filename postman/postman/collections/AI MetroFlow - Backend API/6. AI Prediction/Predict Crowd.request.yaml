@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/predictions/crowd"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_id": 1,
+      "target_datetime": "2026-08-26T09:00:00"
+    }
+order: 1000

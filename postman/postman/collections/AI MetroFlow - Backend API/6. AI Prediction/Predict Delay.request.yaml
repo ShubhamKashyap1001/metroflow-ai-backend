@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/predictions/delay"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "train_id": 1,
+      "station_id": 1
+    }
+order: 4000

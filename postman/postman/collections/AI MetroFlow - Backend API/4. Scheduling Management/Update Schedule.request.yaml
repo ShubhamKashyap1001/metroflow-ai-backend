@@ -1,0 +1,12 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/schedules/1"
+method: PUT
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "platform_number": 2
+    }
+order: 7000

@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/predictions/demand"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: |-
+    {
+      "station_id": 1,
+      "hours_ahead": 6
+    }
+order: 3000

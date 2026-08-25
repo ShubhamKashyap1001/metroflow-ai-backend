@@ -1,0 +1,9 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/meta/nearest-city?lat=28.6139&lng=77.209"
+method: GET
+queryParams:
+  lat: "28.6139"
+  lng: "77.209"
+auth:
+  type: noauth
+order: 3000

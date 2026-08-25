@@ -1,3 +1,22 @@
+"""Milestone 2 - AI Prediction Module: crowd prediction inference.
+
+Loads the trained RandomForest model if present; otherwise falls back
+to a deterministic heuristic curve so the API keeps working even
+before `train_crowd_model.py` has been run (e.g. fresh deploy).
+
+Milestone 17 - scikit-learn compatibility: `joblib.load()` succeeding
+does NOT guarantee `model.predict()` will also succeed. scikit-learn's
+own version check (the pickle's embedded `_sklearn_version`) only ever
+emits a warning, never raises - so a genuinely incompatible model
+(trained on a different sklearn than what's currently installed, e.g.
+these .pkl files were trained on 1.6.1) can load "fine" and then blow
+up with an AttributeError/ValueError deep inside `.predict()` on the
+very first real request, at which point the load-time try/except below
+has already reported success and can't help. Every `.predict()` call
+in this module is wrapped separately (see `predict_crowd`) so a
+predict-time failure degrades that one request to the heuristic
+instead of surfacing a 500.
+"""
 import logging
 import os
 from datetime import datetime

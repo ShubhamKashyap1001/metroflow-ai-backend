@@ -1,0 +1,6 @@
+$kind: http-request
+url: "{{base_url}}/api/v1/trains/routes"
+method: GET
+auth:
+  type: noauth
+order: 5000
