@@ -5,15 +5,15 @@ folder is **not** imported by `app/` in any way. `uvicorn app.main:app`
 never touches anything in here, so it never costs you local CPU just to run
 the API.
 
-All 4 models now train on your **real datasets** (`../datasets/*.csv`)
+All 4 models now train on your **real datasets** (`../datasets/*.csv.gz`, gzipped to stay under GitHub's 100MB file limit)
 instead of synthetic data:
 
 | Model | Trained from |
 |---|---|
-| `crowd_model.pkl` | real `passenger_flow.csv` (via `_real_dataset_builder.py`) |
-| `delay_model.pkl` | real `train_operations.csv` (via `_real_dataset_builder.py`) |
+| `crowd_model.pkl` | real `passenger_flow.csv.gz` (via `_real_dataset_builder.py`) |
+| `delay_model.pkl` | real `train_operations.csv.gz` (via `_real_dataset_builder.py`) |
 | `frequency_model.pkl` | derived from the same real crowd table |
-| `maintenance_model.pkl` | real `predictive_maintenance.csv` directly |
+| `maintenance_model.pkl` | real `predictive_maintenance.csv.gz` directly |
 
 ## Why this folder is separate
 
@@ -76,13 +76,13 @@ from the raw CSVs:
   RandomForest needs one row per feature combination, not one row per
   individual trip/entry log.
 - Passenger-flow data currently only covers 6 of the 12 cities in
-  `stations.csv` - the other 6 cities' stations exist in the DB (from
+  `stations.csv.gz` - the other 6 cities' stations exist in the DB (from
   `seed_real_data.py`) but the crowd/delay/frequency models won't have real
   training signal for them until a passenger-flow export covering those
-  cities is added. `predictive_maintenance.csv` and `train_operations.csv`,
+  cities is added. `predictive_maintenance.csv.gz` and `train_operations.csv.gz`,
   by contrast, already cover all 12 cities.
 
-`train_maintenance_model.py` uses `predictive_maintenance.csv` directly (no
+`train_maintenance_model.py` uses `predictive_maintenance.csv.gz` directly (no
 join needed) - it's already one row per train reading with no station
 matching required.
 
@@ -92,6 +92,6 @@ matching required.
 |---|---|
 | `train_metroflow_models_colab.ipynb` | The notebook - run this in Colab |
 | `train_crowd_model.py` / `train_delay_model.py` / `train_frequency_model.py` / `train_maintenance_model.py` | Standalone training scripts, one per model |
-| `_real_dataset_builder.py` | Builds the crowd/delay/frequency training table from `../datasets/passenger_flow.csv` + `train_operations.csv` + `stations.csv` |
+| `_real_dataset_builder.py` | Builds the crowd/delay/frequency training table from `../datasets/passenger_flow.csv.gz` + `train_operations.csv.gz` + `stations.csv.gz` |
 | `time_features.py` | Feature-engineering helper (unused by the running app; kept for reference/future use) |
 | `clean_ridership.py` | Placeholder real-data preprocessing helper (unused by the running app; kept for reference/future use) |

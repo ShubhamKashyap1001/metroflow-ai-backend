@@ -50,6 +50,34 @@ def _heuristic(hour: int, is_weekend: int) -> float:
         base *= 0.55
     return float(base)
 
+def _predict_one(model, model_name: str, features: pd.DataFrame, light: bool) -> dict:
+    """Run a single already-fitted model and shape its output the same
+    way regardless of which algorithm it is."""
+    # Passenger counts can never be negative - a regression model can
+    # still extrapolate below zero for feature combos it saw little of
+    # during training (e.g. very late-night hours), so clamp here the
+    # same way delay_predictor/frequency_predictor already clamp their
+    # own outputs, instead of letting a negative count leak into the
+    # dashboards (aggregate sums of many negative per-station
+    # predictions is what made "Passenger Analytics" render upside
+    # down with negative totals).
+    predicted_count = max(0.0, float(model.predict(features)[0]))
+    if light:
+        confidence = None
+    elif hasattr(model, "estimators_"):
+        # Per-tree confidence only makes sense for a forest
+        # (RandomForest); XGBoost's boosted trees aren't independent
+        # votes, so there's no equivalent cheap per-tree spread here.
+        tree_preds = [t.predict(features.values)[0] for t in model.estimators_]
+        confidence = float(max(0.0, 1 - (np.std(tree_preds) / (np.mean(tree_preds) + 1e-6))))
+    else:
+        confidence = None
+    return {
+        "predicted_count": round(predicted_count),
+        "confidence": None if confidence is None else round(min(confidence, 0.99), 3),
+        "model_version": f"{model_name}_v1",
+    }
+
 def predict_crowd(
     station_id: int,
     target_datetime: datetime | None = None,
@@ -62,7 +90,13 @@ def predict_crowd(
     reads `confidence` at all - running the full forest-vote loop
     there was pure wasted CPU that added up across every station on
     every tick. The real /prediction/crowd API endpoint (where a user
-    actually sees confidence) still calls this with light=False."""
+    actually sees confidence) still calls this with light=False.
+
+    Returns the winning (lowest-MAE-at-training-time) model's result at
+    the top level, same shape as before, PLUS a `models` dict with every
+    trained candidate's prediction (currently random_forest and
+    xgboost) so callers that want to show both side by side can, without
+    the winner-takes-all fallback logic needing to change."""
     dt = target_datetime or datetime.utcnow()
     hour = dt.hour
     day_of_week = dt.weekday()
@@ -71,22 +105,37 @@ def predict_crowd(
 
     bundle = _load_model()
     predicted_count = confidence = model_version = None
+    per_model: dict[str, dict] = {}
 
     if bundle is not None:
         try:
-            model = bundle["model"]
             features = pd.DataFrame(
                 [[station_id, hour, day_of_week, is_weekend, is_peak_hour]],
                 columns=bundle["features"],
             )
-            predicted_count = float(model.predict(features)[0])
+            trained_name = bundle.get("model_name", "random_forest")
+            all_candidates = bundle.get("models") or {trained_name: bundle["model"]}
+
             if light:
-                confidence = None
+                # Simulator hot path (called once per station every
+                # tick, never reads `models`) - only run the winning
+                # model, exactly like before this file supported dual
+                # predictions. Running both candidates here would
+                # silently double inference cost on every tick for a
+                # result nobody consumes.
+                winner_model = all_candidates.get(trained_name) or next(iter(all_candidates.values()))
+                winner = _predict_one(winner_model, trained_name, features, light)
             else:
-                                                                            
-                tree_preds = [t.predict(features.values)[0] for t in model.estimators_]
-                confidence = float(max(0.0, 1 - (np.std(tree_preds) / (np.mean(tree_preds) + 1e-6))))
-            model_version = "random_forest_v1"
+                # Real user-facing prediction call - compute every
+                # candidate so the API/dashboard can show Random Forest
+                # and XGBoost side by side.
+                for name, model in all_candidates.items():
+                    per_model[name] = _predict_one(model, name, features, light)
+                winner = per_model.get(trained_name) or next(iter(per_model.values()))
+
+            predicted_count = winner["predicted_count"]
+            confidence = winner["confidence"]
+            model_version = winner["model_version"]
         except Exception as exc:                                                  
                                                                     
             logger.warning(
@@ -94,18 +143,21 @@ def predict_crowd(
                 exc,
             )
             predicted_count = None
+            per_model = {}
 
     if predicted_count is None:
-        predicted_count = _heuristic(hour, is_weekend)
+        predicted_count = round(_heuristic(hour, is_weekend))
         confidence = None if light else 0.5
         model_version = "heuristic_fallback"
+        per_model = {}
 
     return {
         "station_id": station_id,
         "target_datetime": dt,
-        "predicted_count": round(predicted_count),
-        "confidence": None if confidence is None else round(min(confidence, 0.99), 3),
+        "predicted_count": predicted_count,
+        "confidence": confidence,
         "model_version": model_version,
+        "models": per_model,
     }
 
 def predict_crowd_bulk(station_ids: list[int], hours: list[int], target_date: datetime) -> dict[tuple[int, int], dict]:
@@ -157,10 +209,16 @@ def predict_crowd_bulk(station_ids: list[int], hours: list[int], target_date: da
             )
             predicted = None
 
+    trained_name = bundle.get("model_name", "random_forest") if bundle is not None else None
     for i, (station_id, hour) in enumerate(keys):
         if predicted is not None:
-            predicted_count = float(predicted[i])
-            model_version = "random_forest_v1"
+            # Same non-negative clamp as _predict_one() above - this is
+            # the vectorized path all_stations_traffic_pattern() calls
+            # for every station x hour, so an unclamped negative value
+            # here is what was summing into a large negative total per
+            # hour on the "Passenger Analytics" (all stations) chart.
+            predicted_count = max(0.0, float(predicted[i]))
+            model_version = f"{trained_name}_v1"
         else:
             predicted_count = _heuristic(hour, is_weekend)
             model_version = "heuristic_fallback"

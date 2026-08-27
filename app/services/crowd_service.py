@@ -166,6 +166,60 @@ def get_congested_stations(
         if order.index(s["crowd_level"]) >= threshold_index
     ]
 
+
+def get_inflow_outflow_bulk(
+    db: Session, station_ids: list[int], hours: int = 1
+) -> dict[int, dict]:
+    """Same in/out delta logic as get_inflow_outflow(), computed for many
+    stations in a single query instead of one round-trip per station -
+    used by get_station_monitor() for the dashboard's Live Station
+    Monitor widget so listing N stations doesn't cost N+1 queries."""
+    result: dict[int, dict] = {sid: {"inflow": 0, "outflow": 0, "samples": 0} for sid in station_ids}
+    if not station_ids:
+        return result
+
+    since = datetime.utcnow() - timedelta(hours=hours)
+    logs = (
+        db.query(CrowdLog)
+        .filter(CrowdLog.station_id.in_(station_ids), CrowdLog.created_at >= since)
+        .order_by(CrowdLog.station_id.asc(), CrowdLog.created_at.asc())
+        .all()
+    )
+
+    previous_by_station: dict[int, int] = {}
+    for log in logs:
+        entry = result[log.station_id]
+        entry["samples"] += 1
+        previous_count = previous_by_station.get(log.station_id)
+        if previous_count is not None:
+            delta = log.current_count - previous_count
+            if delta > 0:
+                entry["inflow"] += delta
+            else:
+                entry["outflow"] += abs(delta)
+        previous_by_station[log.station_id] = log.current_count
+
+    return result
+
+def get_station_monitor(db: Session, state: str | None = None, hours: int = 1) -> list[dict]:
+    """Combined feed for the dashboard's Live Station Monitor widget:
+    each active station's current density plus a short-window
+    passenger in/out delta, busiest first. `state` filters to one
+    city/state the same way every other crowd endpoint does."""
+    snapshot = get_station_wise_snapshot(db, state)
+    station_ids = [s["station_id"] for s in snapshot]
+    flows = get_inflow_outflow_bulk(db, station_ids, hours=hours)
+
+    for entry in snapshot:
+        flow = flows.get(entry["station_id"], {"inflow": 0, "outflow": 0})
+        entry["inflow"] = flow["inflow"]
+        entry["outflow"] = flow["outflow"]
+
+    snapshot.sort(key=lambda s: s["occupancy_ratio"] or 0, reverse=True)
+    return snapshot
+
+
+
 def get_inflow_outflow(db: Session, station_id: int, hours: int = 24) -> dict:
     since = datetime.utcnow() - timedelta(hours=hours)
     logs = (

@@ -40,3 +40,13 @@ class EnquiryResponse(BaseModel):
     updated_at: datetime
     user: EnquirerSummary | None = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class EnquiryStats(BaseModel):
+    """Counts for the enquiry dashboard cards. Scoped exactly like
+    list_enquiries: staff get totals across everyone, a passenger
+    gets counts of only their own enquiries."""
+    total: int
+    open: int
+    in_progress: int
+    resolved: int

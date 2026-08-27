@@ -45,6 +45,18 @@ def test_frequency_recommendation_requires_auth(client):
     assert response.status_code in (401, 403)
 
 
+def test_delay_model_metrics_requires_auth(client):
+    """Powers the delay section of the AI Prediction dashboard page."""
+    response = client.get("/api/v1/predictions/delay/metrics")
+    assert response.status_code in (401, 403)
+
+
+def test_frequency_model_metrics_requires_auth(client):
+    """Powers the frequency section of the AI Prediction dashboard page."""
+    response = client.get("/api/v1/predictions/frequency/metrics")
+    assert response.status_code in (401, 403)
+
+
 def test_traffic_pattern_aggregate_requires_auth(client):
     response = client.get("/api/v1/predictions/traffic-pattern-aggregate/all")
     assert response.status_code in (401, 403)

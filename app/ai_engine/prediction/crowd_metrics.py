@@ -4,7 +4,9 @@ crowd/demand prediction model.
 Powers the crowd/demand section of the "AI Prediction" dashboard page.
 The crowd model and the demand model are the SAME trained artifact in
 this codebase (see prediction_service.forecast_demand, which just calls
-predict_crowd() repeatedly for future hours) - a RandomForestRegressor
+predict_crowd() repeatedly for future hours) - either a
+RandomForestRegressor or an XGBRegressor (whichever had the lower
+held-out MAE at training time, see colab_training/train_crowd_model.py)
 predicting passenger_count for a station/hour slot. Everything below is
 computed from the REAL datasets/passenger_flow.csv + datasets/stations.csv
 and the REAL trained crowd_model.pkl - nothing is hardcoded.
@@ -48,8 +50,10 @@ from sklearn.model_selection import train_test_split
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "crowd_model.pkl")
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets")
-STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv")
-PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv")
+STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
+PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
+# Gzipped to stay under GitHub's 100MB file limit - pd.read_csv infers
+# the compression from the ".gz" extension, no other change needed.
 
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 TARGET = "passenger_count"
@@ -111,6 +115,61 @@ def _unavailable() -> dict:
         "classes": [],
         "confusion_matrix": [],
         "feature_importance": [],
+        "models": {},
+    }
+
+DISPLAY_NAMES = {"random_forest": "Random Forest", "xgboost": "XGBoost"}
+
+def _evaluate_one(model, model_features, X_test, y_test_arr, implied_capacity, trained_rows) -> dict:
+    """Same evaluation _compute_crowd_metrics used to do for a single
+    model - now factored out so it can run once per candidate model
+    (currently random_forest and xgboost) instead of only the winner."""
+    predicted = model.predict(X_test[model_features])
+
+    mae = float(mean_absolute_error(y_test_arr, predicted))
+    r2 = float(r2_score(y_test_arr, predicted))
+
+    nonzero = y_test_arr > 0
+    mape = float(np.mean(np.abs((y_test_arr[nonzero] - predicted[nonzero]) / y_test_arr[nonzero])) * 100) if nonzero.any() else None
+
+    actual_status = np.array([_bucket(v / implied_capacity) for v in y_test_arr])
+    predicted_status = np.array([_bucket(v / implied_capacity) for v in predicted])
+
+    accuracy = float(accuracy_score(actual_status, predicted_status))
+    macro_f1 = float(f1_score(actual_status, predicted_status, labels=CLASSES, average="macro", zero_division=0))
+    matrix = confusion_matrix(actual_status, predicted_status, labels=CLASSES)
+
+    critical_idx = CLASSES.index("critical")
+    critical_row = matrix[critical_idx]
+    critical_total = int(critical_row.sum())
+    critical_recall = float(critical_row[critical_idx] / critical_total) if critical_total > 0 else None
+
+    importances = getattr(model, "feature_importances_", None)
+    if importances is not None:
+        feature_importance = sorted(
+            (
+                {"feature": f, "importance": float(imp)}
+                for f, imp in zip(model_features, importances)
+            ),
+            key=lambda item: item["importance"],
+            reverse=True,
+        )
+    else:
+        feature_importance = []
+
+    return {
+        "available": True,
+        "mae": round(mae, 2),
+        "mape_pct": round(mape, 2) if mape is not None else None,
+        "r2": round(r2, 4),
+        "accuracy": round(accuracy, 4),
+        "macro_f1": round(macro_f1, 4),
+        "critical_recall": round(critical_recall, 4) if critical_recall is not None else None,
+        "trained_rows": trained_rows,
+        "test_rows": len(X_test),
+        "classes": CLASSES,
+        "confusion_matrix": matrix.tolist(),
+        "feature_importance": feature_importance,
     }
 
 @lru_cache(maxsize=1)
@@ -124,8 +183,12 @@ def compute_crowd_metrics() -> dict:
         return _unavailable()
 
     try:
-        model = bundle["model"]
         model_features = bundle.get("features", FEATURES)
+        # Evaluate every saved candidate (random_forest, xgboost), not
+        # just the winner - falls back to the single `model` key for
+        # any older .pkl trained before both were saved.
+        trained_name = bundle.get("model_name", "random_forest")
+        candidates = bundle.get("models") or {trained_name: bundle["model"]}
 
         station_id_map = _station_id_map()
 
@@ -152,55 +215,35 @@ def compute_crowd_metrics() -> dict:
         X = grouped[FEATURES]
         y = grouped[TARGET]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        predicted = model.predict(X_test[model_features])
         y_test_arr = y_test.to_numpy()
 
-        mae = float(mean_absolute_error(y_test_arr, predicted))
-        r2 = float(r2_score(y_test_arr, predicted))
-
-        nonzero = y_test_arr > 0
-        mape = float(np.mean(np.abs((y_test_arr[nonzero] - predicted[nonzero]) / y_test_arr[nonzero])) * 100) if nonzero.any() else None
-
-        actual_status = np.array([_bucket(v / implied_capacity) for v in y_test_arr])
-        predicted_status = np.array([_bucket(v / implied_capacity) for v in predicted])
-
-        accuracy = float(accuracy_score(actual_status, predicted_status))
-        macro_f1 = float(f1_score(actual_status, predicted_status, labels=CLASSES, average="macro", zero_division=0))
-        matrix = confusion_matrix(actual_status, predicted_status, labels=CLASSES)
-
-        critical_idx = CLASSES.index("critical")
-        critical_row = matrix[critical_idx]
-        critical_total = int(critical_row.sum())
-        critical_recall = float(critical_row[critical_idx] / critical_total) if critical_total > 0 else None
-
-        importances = getattr(model, "feature_importances_", None)
-        if importances is not None:
-            feature_importance = sorted(
-                (
-                    {"feature": f, "importance": float(imp)}
-                    for f, imp in zip(model_features, importances)
-                ),
-                key=lambda item: item["importance"],
-                reverse=True,
+        models_out = {}
+        for name, candidate_model in candidates.items():
+            evaluated = _evaluate_one(
+                candidate_model, model_features, X_test, y_test_arr,
+                implied_capacity, len(X_train),
             )
-        else:
-            feature_importance = []
+            evaluated["model_name"] = DISPLAY_NAMES.get(name, name)
+            models_out[name] = evaluated
+
+        best = models_out.get(trained_name) or next(iter(models_out.values()))
+        display_name = DISPLAY_NAMES.get(trained_name, trained_name)
 
         return {
             "available": True,
-            "model_name": "Random Forest",
-            "mae": round(mae, 2),
-            "mape_pct": round(mape, 2) if mape is not None else None,
-            "r2": round(r2, 4),
-            "accuracy": round(accuracy, 4),
-            "macro_f1": round(macro_f1, 4),
-            "critical_recall": round(critical_recall, 4) if critical_recall is not None else None,
-            "trained_rows": len(X_train),
-            "test_rows": len(X_test),
+            "model_name": display_name,
+            "mae": best["mae"],
+            "mape_pct": best["mape_pct"],
+            "r2": best["r2"],
+            "accuracy": best["accuracy"],
+            "macro_f1": best["macro_f1"],
+            "critical_recall": best["critical_recall"],
+            "trained_rows": best["trained_rows"],
+            "test_rows": best["test_rows"],
             "classes": CLASSES,
-            "confusion_matrix": matrix.tolist(),
-            "feature_importance": feature_importance,
+            "confusion_matrix": best["confusion_matrix"],
+            "feature_importance": best["feature_importance"],
+            "models": models_out,
         }
     except Exception as exc:
         print(f"[{__name__}] failed to compute crowd metrics: {exc!r}")

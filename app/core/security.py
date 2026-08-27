@@ -225,6 +225,30 @@ def _get_or_create_profile(db: Session, payload: dict) -> UserProfile:
     cache.set_json(_profile_cache_key(user_id), _serialize_profile(user), ttl_seconds=settings.AUTH_USER_CACHE_TTL_SECONDS)
     return user
 
+def get_user_from_token_optional(token: str | None, db: Session) -> UserProfile | None:
+    """Like get_current_user, but for the WebSocket handshake: browsers
+    can't set an Authorization header on a WS upgrade, so the token
+    (when present) arrives as a ?token= query param instead of via
+    oauth2_scheme, and a missing/invalid token should degrade to an
+    anonymous (broadcast-only) connection rather than reject the
+    upgrade outright - most of the app's existing WS usage (crowd/
+    train updates) is intentionally public. Never raises."""
+    if not token:
+        return None
+    try:
+        if settings.AUTH_DISABLED:
+            user = _get_or_create_profile_by_email(db, token)
+        else:
+            payload = _decode_supabase_token(token)
+            user = _get_or_create_profile(db, payload)
+        if not user.is_active:
+            return None
+        return user
+    except HTTPException:
+        return None
+    except Exception:
+        return None
+
 def get_current_user(
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),

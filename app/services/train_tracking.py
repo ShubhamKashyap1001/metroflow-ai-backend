@@ -53,8 +53,15 @@ def _refresh_route_cache(db: Session) -> None:
     arrival_times: dict[int, list[time]] = {}
                                                                
     seen_stations: dict[int, set[int]] = {}
+    # Only the 3 columns actually used below - pulling full ORM rows
+    # (15 columns incl. platform_number, day_type, actual_*, timestamps
+    # etc., none read here) multiplies the payload for no reason. On a
+    # schedule table with hundreds of thousands of rows that's enough
+    # extra transfer time/size for Postgres to drop the connection
+    # mid-query, which leaves routes empty (and Active Trains stuck at
+    # 0) run after run even though nothing actually errors loudly.
     schedules = (
-        db.query(TrainSchedule)
+        db.query(TrainSchedule.train_id, TrainSchedule.station_id, TrainSchedule.arrival_time)
         .order_by(TrainSchedule.train_id, TrainSchedule.arrival_time, TrainSchedule.id)
         .all()
     )

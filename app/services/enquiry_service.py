@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
+from sqlalchemy import func
+
 from app.enums.enquiry_status import EnquiryStatus
 from app.enums.notification_source import NotificationSource
 from app.enums.user_role import UserRole
@@ -85,3 +87,19 @@ def resolve_enquiry(
     )
 
     return enquiry
+
+
+def get_enquiry_stats(db: Session, current_user: UserProfile) -> dict:
+    query = db.query(Enquiry.status, func.count(Enquiry.id))
+
+    if current_user.role not in (UserRole.ADMIN, UserRole.OPERATOR):
+        query = query.filter(Enquiry.user_id == current_user.id)
+
+    counts = dict(query.group_by(Enquiry.status).all())
+
+    return {
+        "total": sum(counts.values()),
+        "open": counts.get(EnquiryStatus.OPEN, 0),
+        "in_progress": counts.get(EnquiryStatus.IN_PROGRESS, 0),
+        "resolved": counts.get(EnquiryStatus.RESOLVED, 0),
+    }

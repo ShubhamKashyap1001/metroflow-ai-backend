@@ -74,6 +74,7 @@ def create_alert(db: Session, payload: AlertCreate, created_by: str | None = Non
         title=f"{alert.alert_type.value.title()} alert - {station_name}",
         message=alert.message,
         related_alert_id=alert.id,
+        state=station.city if station else None,
     )
 
     return alert
@@ -113,13 +114,15 @@ def _log_results(db: Session, alert_id: int, channel: NotificationChannel, resul
     if channel == NotificationChannel.EMAIL:
         sent_count = sum(1 for outcome in results.values() if outcome == "sent")
         if sent_count:
-                                                                    
+            alert = db.get(Alert, alert_id)
+            station = db.get(Station, alert.station_id) if alert else None
             notification_service.create_notification(
                 db,
                 source=NotificationSource.EMAIL,
                 title="Email notifications sent",
                 message=f"Email notification sent to {sent_count} recipient(s) for alert #{alert_id}.",
                 related_alert_id=alert_id,
+                state=station.city if station else None,
             )
 
 def _dispatch(

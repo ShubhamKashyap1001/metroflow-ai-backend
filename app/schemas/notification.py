@@ -13,6 +13,7 @@ class NotificationResponse(BaseModel):
     title: str
     message: str
     related_alert_id: int | None
+    state: str | None = None
     is_read: bool
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)

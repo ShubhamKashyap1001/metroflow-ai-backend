@@ -12,6 +12,12 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 logger = logging.getLogger(__name__)
 
+from app.core import log_buffer
+# Attach the in-memory log ring buffer as early as possible so it
+# captures startup-time log records too (model warmup, simulator
+# boot, etc.), not just requests handled after the app is "ready".
+log_buffer.install()
+
 from app.api.v1 import (
     admin,
     alerts,
@@ -32,6 +38,7 @@ from app.api.v1 import (
     users,
 )
 from app.core.config import settings
+from app.core.security import get_user_from_token_optional
 from app.database.session import SessionLocal
 from app.enums.notification_source import NotificationSource
 from app.services import notification_service
@@ -48,6 +55,13 @@ limiter = Limiter(key_func=get_ipaddr, default_limits=["100/minute"])
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.bind_loop(asyncio.get_running_loop())
+
+    # Load the 3 .pkl model bundles now, during startup, instead of
+    # letting the first real prediction request pay that cost (see
+    # app/ai_engine/warmup.py). Runs in a worker thread so a slow disk
+    # read can't block the event loop from coming up.
+    from app.ai_engine.warmup import warm_up_models
+    await asyncio.to_thread(warm_up_models)
 
     tick = settings.SIMULATOR_INTERVAL_SECONDS
     if settings.ENABLE_SIMULATOR:
@@ -152,8 +166,22 @@ def healthz():
     return {"status": "ok"}
 
 @app.websocket("/ws/monitor")
-async def websocket_monitor(websocket: WebSocket):
-    await manager.connect(websocket)
+async def websocket_monitor(websocket: WebSocket, token: str | None = None):
+    """`?token=` is optional so existing public/anonymous usage (crowd
+    and train-position broadcasts) keeps working unauthenticated. When
+    a token is present it's decoded with the same Supabase verification
+    used on REST requests, and the connection is registered under that
+    user_id so notification_service can target them directly (see
+    ConnectionManager.notify_user)."""
+    user = None
+    if token:
+        db = SessionLocal()
+        try:
+            user = get_user_from_token_optional(token, db)
+        finally:
+            db.close()
+
+    await manager.connect(websocket, user_id=str(user.id) if user else None)
     try:
         while True:
             await websocket.receive_text()

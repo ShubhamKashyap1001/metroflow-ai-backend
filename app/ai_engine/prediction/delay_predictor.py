@@ -105,27 +105,47 @@ def predict_delay(
 
     bundle = _load_model()
     predicted_delay = None
+    per_model: dict[str, dict] = {}
 
     if bundle is not None:
         try:
-            model = bundle["model"]
+            trained_name = bundle.get("model_name", "random_forest")
+            candidates = bundle.get("models") or {trained_name: bundle["model"]}
+            train_age_days = _real_train_age_days(db, train_id)
+            # row_values carries every name/unit this bundle's "features"
+            # list might use, since different training runs of this
+            # model have shipped with different naming: some use
+            # "station_id" / "train_age_days", others (e.g. the current
+            # real-data crowd/delay/frequency .pkl set) use "station_code"
+            # / "train_age_years". A plain rename would silently corrupt
+            # the delay prediction for the *_years case (years and days
+            # are on completely different scales), so it's converted
+            # here, not just aliased.
             row_values = {
                 "station_id": station_id,
+                "station_code": station_id,
                 "hour": hour,
                 "day_of_week": day_of_week,
                 "is_weekend": is_weekend,
                 "is_peak_hour": is_peak_hour,
                 "passenger_count": passenger_count,
                 "capacity_passengers": _real_capacity_passengers(db, train_id),
-                "train_age_days": _real_train_age_days(db, train_id),
+                "train_age_days": train_age_days,
+                "train_age_years": train_age_days / 365.25,
             }
                                                                        
             features = pd.DataFrame(
                 [[row_values[f] for f in bundle["features"]]],
                 columns=bundle["features"],
             )
-            predicted_delay = float(model.predict(features)[0])
-            model_version = "random_forest_v1"
+            for name, model in candidates.items():
+                per_model[name] = {
+                    "predicted_delay_minutes": round(max(0.0, float(model.predict(features)[0])), 1),
+                    "model_version": f"{name}_v1",
+                }
+            winner = per_model.get(trained_name) or next(iter(per_model.values()))
+            predicted_delay = winner["predicted_delay_minutes"]
+            model_version = winner["model_version"]
         except Exception as exc:                                                  
                                                                      
             logger.warning(
@@ -133,15 +153,20 @@ def predict_delay(
                 exc,
             )
             predicted_delay = None
+            per_model = {}
 
     if predicted_delay is None:
-        predicted_delay = max(0.0, (passenger_count / 1000) * 4)
+        predicted_delay = round(max(0.0, (passenger_count / 1000) * 4), 1)
         model_version = "heuristic_fallback"
+        per_model = {}
 
     return {
         "station_id": station_id,
         "target_datetime": dt,
-        "predicted_delay_minutes": round(max(0.0, predicted_delay), 1),
+        "predicted_delay_minutes": predicted_delay,
         "based_on_predicted_crowd": passenger_count,
         "model_version": model_version,
+        # Per-candidate breakdown (random_forest / xgboost), same
+        # pattern as crowd_predictor.predict_crowd's `models` field.
+        "models": per_model,
     }

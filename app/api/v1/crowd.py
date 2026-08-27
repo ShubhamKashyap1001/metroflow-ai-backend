@@ -49,6 +49,20 @@ def congestion(
     """Congestion monitoring: stations at/above a given crowd level."""
     return crowd_service.get_congested_stations(db, min_level, state)
 
+@router.get("/station-monitor")
+def station_monitor(
+    state: str | None = None,
+    hours: int = 1,
+    db: Session = Depends(get_db),
+):
+    """Live Station Monitor feed for the dashboard: every active
+    station's density + a short-window passenger in/out delta,
+    busiest first. `state` scopes it to one city/state - pass the
+    currently selected city so the widget only shows that city's
+    stations."""
+    return crowd_service.get_station_monitor(db, state, hours)
+
+
 @router.get("/{station_id}")
 def get_station_crowd(station_id: int, db: Session = Depends(get_db)):
     latest = crowd_service.get_latest_crowd(db, station_id)

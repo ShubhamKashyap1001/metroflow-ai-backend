@@ -62,17 +62,20 @@ def _color_for_line(line_name: str, fallback_index: int) -> str:
     return LINE_COLORS[fallback_index % len(LINE_COLORS)]
 
 def _load_csvs(dataset_dir: str) -> dict[str, pd.DataFrame]:
+    # Gzipped (.csv.gz) to stay under GitHub's 100MB per-file push limit -
+    # pandas infers the compression from the ".gz" extension on its own,
+    # so pd.read_csv below needs no other change.
     paths = {
-        "stations": os.path.join(dataset_dir, "stations.csv"),
-        "trains": os.path.join(dataset_dir, "trains.csv"),
-        "passenger_flow": os.path.join(dataset_dir, "passenger_flow.csv"),
-        "train_operations": os.path.join(dataset_dir, "train_operations.csv"),
+        "stations": os.path.join(dataset_dir, "stations.csv.gz"),
+        "trains": os.path.join(dataset_dir, "trains.csv.gz"),
+        "passenger_flow": os.path.join(dataset_dir, "passenger_flow.csv.gz"),
+        "train_operations": os.path.join(dataset_dir, "train_operations.csv.gz"),
     }
     missing = [name for name, p in paths.items() if not os.path.exists(p)]
     if missing:
         raise FileNotFoundError(
-            f"Missing CSV(s) in {dataset_dir}: {', '.join(missing)}.csv - "
-            f"copy your 4 real CSVs there first (or pass --dir)."
+            f"Missing CSV(s) in {dataset_dir}: {', '.join(missing)}.csv.gz - "
+            f"copy your 4 real gzipped CSVs there first (or pass --dir)."
         )
     return {name: pd.read_csv(p) for name, p in paths.items()}
 
@@ -164,6 +167,26 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.add_all(train_list)
         db.flush()
 
+        # Commit stations/lines/line_stations/trains now, before the
+        # train_operations loop below. Without this, everything since
+        # SessionLocal() was opened stays uncommitted (flush() assigns
+        # IDs but doesn't end the transaction) for as long as the
+        # ~469K-row schedule loop takes to run - often several minutes
+        # on a remote DB. A transaction left open that long is exactly
+        # what a connection pooler in front of Postgres (e.g. Supabase's
+        # pgbouncer in transaction-pooling mode) or the DB's own idle/
+        # statement timeout will kill, which surfaces later as
+        # "psycopg2.OperationalError: server closed the connection
+        # unexpectedly" on some unrelated later commit - confusing,
+        # since the actual cause is this stale, still-open transaction,
+        # not whatever commit happened to be running when it got killed.
+        # Committing here makes this data durable immediately and lets
+        # the long schedule loop start on a fresh, short-lived
+        # transaction per chunk (see CHUNK_SIZE below), same reasoning.
+        db.commit()
+        print(f"  stations/lines/trains: {len(station_list)} stations, "
+              f"{len(line_list)} lines, {len(train_list)} trains committed.")
+
         ops_df = raw["train_operations"].copy()
         ops_df["station_id"] = ops_df["station_id"].astype(str).str.strip()
         ops_df["train_id"] = ops_df["train_id"].astype(str).str.strip()
@@ -172,8 +195,30 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         ops_df["scheduled_arrival"] = pd.to_datetime(ops_df["scheduled_arrival"])
         ops_df["scheduled_departure"] = pd.to_datetime(ops_df["scheduled_departure"])
 
-        schedule_rows = []
+        # train_operations.csv.gz is ~469K rows. Building all of those as
+        # live ORM TrainSchedule() objects and handing them to a single
+        # db.add_all(...) + one db.commit() at the very end (the original
+        # approach) opens ONE transaction that has to hold ~469K rows'
+        # worth of INSERT statements plus SQLAlchemy's identity-map
+        # bookkeeping for every one of those objects for the entire
+        # duration. In practice that's what was crashing the seed with
+        # "server closed the connection unexpectedly" - a transaction
+        # that large/long-running gets killed by the DB server itself
+        # (statement/idle timeouts), by a pooler in front of it (e.g.
+        # Supabase's pgbouncer in transaction mode), or just by ordinary
+        # network flakiness over however many minutes it takes.
+        #
+        # Fix: build plain dicts (no ORM identity-map overhead) and
+        # insert them in bounded chunks via bulk_insert_mappings, with a
+        # commit after every chunk. Each chunk is its own short
+        # transaction, so a drop mid-seed loses at most one chunk's
+        # worth of rows (re-running with --reset starts clean anyway),
+        # and no single transaction ever has to stay open for the whole
+        # 469K-row load.
+        CHUNK_SIZE = 5000
+        schedule_dicts: list[dict] = []
         dropped = 0
+        inserted = 0
         for _, orow in ops_df.iterrows():
             train = train_by_number.get(orow["train_id"])
             db_station = station_rows.get(orow["station_id"])
@@ -184,21 +229,31 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             hour = orow["scheduled_arrival"].hour
             is_peak = 8 <= hour <= 11 or 17 <= hour <= 20
             delay_minutes = int(round(orow["delay_arrival_min"]))
-            schedule_rows.append(TrainSchedule(
-                train_id=train.id,
-                station_id=db_station.id,
-                arrival_time=orow["scheduled_arrival"].time(),
-                departure_time=orow["scheduled_departure"].time(),
-                platform_number=(int(orow["station_sequence"]) % 2) + 1,
-                day_type=DayType.WEEKEND if is_weekend else DayType.WEEKDAY,
-                is_peak_hour=bool(is_peak),
-                frequency_minutes=5 if is_peak else 12,
-                delay_minutes=delay_minutes,
-                status=ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
-            ))
+            schedule_dicts.append({
+                "train_id": train.id,
+                "station_id": db_station.id,
+                "arrival_time": orow["scheduled_arrival"].time(),
+                "departure_time": orow["scheduled_departure"].time(),
+                "platform_number": (int(orow["station_sequence"]) % 2) + 1,
+                "day_type": DayType.WEEKEND if is_weekend else DayType.WEEKDAY,
+                "is_peak_hour": bool(is_peak),
+                "frequency_minutes": 5 if is_peak else 12,
+                "delay_minutes": delay_minutes,
+                "status": ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
+            })
+            if len(schedule_dicts) >= CHUNK_SIZE:
+                db.bulk_insert_mappings(TrainSchedule, schedule_dicts)
+                db.commit()
+                inserted += len(schedule_dicts)
+                print(f"  train_schedules: {inserted}/{len(ops_df) - dropped} inserted...", end="\r")
+                schedule_dicts = []
+        if schedule_dicts:
+            db.bulk_insert_mappings(TrainSchedule, schedule_dicts)
+            db.commit()
+            inserted += len(schedule_dicts)
         if dropped:
-            print(f"train_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
-        db.add_all(schedule_rows)
+            print(f"\ntrain_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
+        print(f"  train_schedules: {inserted} inserted (done).")
 
         flow_df = raw["passenger_flow"].copy()
         flow_df["station_id"] = flow_df["station_id"].astype(str).str.strip()
@@ -219,7 +274,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             f"Seeded {len(station_rows)} real stations across "
             f"{stations_df['city'].nunique()} cities, {len(line_by_key)} lines, "
             f"{len(train_by_number)} trains (real capacity + commissioned_date "
-            f"from trains.csv), {len(schedule_rows)} real schedule entries, and "
+            f"from trains.csv), {inserted} real schedule entries, and "
             f"{len(crowd_rows)} crowd snapshots - EVERY station now has real "
             f"passenger_flow.csv coverage (this dataset covers all "
             f"{len(station_rows)}, not just 6 like the previous one)."
