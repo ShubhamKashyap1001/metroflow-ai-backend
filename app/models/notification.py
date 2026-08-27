@@ -69,6 +69,14 @@ class Notification(TimestampMixin, Base):
         ForeignKey("alerts.id"), nullable=True
     )
 
+    # Which state/region this notification is about (e.g. "West Bengal"
+    # for a Kolkata station), resolved from the station's city via
+    # app/utils/geo.py at creation time - NULL means "not tied to any
+    # one state" (system announcements, login notices, etc.) and is
+    # always shown regardless of the user's selected state filter.
+    # See app/services/notification_service.py::create_notification.
+    state: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     is_read: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )

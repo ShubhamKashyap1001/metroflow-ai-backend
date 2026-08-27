@@ -84,7 +84,7 @@ def forecast_crowd(db: Session, station_id: int, target_datetime: datetime | Non
     _require_station(db, station_id)
     dt = target_datetime or datetime.utcnow()
     result = _cached_predict_crowd(station_id, dt)
-    return _save_prediction(
+    record = _save_prediction(
         db,
         station_id=station_id,
         prediction_type=PredictionType.CROWD,
@@ -93,6 +93,12 @@ def forecast_crowd(db: Session, station_id: int, target_datetime: datetime | Non
         target_datetime=result["target_datetime"],
         model_version=result["model_version"],
     )
+    # Per-candidate breakdown (random_forest/xgboost) isn't a DB
+    # column - Prediction only ever stores the winning model's value -
+    # so it's attached to the already-saved/refreshed record here,
+    # purely for this response, instead of being silently dropped.
+    record.models = result.get("models", {})
+    return record
 
 def forecast_demand(db: Session, station_id: int, hours_ahead: int = 6) -> list[Prediction]:
     """Passenger demand forecasting: hour-by-hour for the next N hours."""
@@ -124,7 +130,7 @@ def forecast_delay(db: Session, train_id: int, station_id: int) -> Prediction:
     _require_station(db, station_id)
     dt = datetime.utcnow()
     result = _cached_predict_delay(db, station_id, dt, train_id=train_id)
-    return _save_prediction(
+    record = _save_prediction(
         db,
         station_id=station_id,
         prediction_type=PredictionType.DELAY,
@@ -133,6 +139,11 @@ def forecast_delay(db: Session, train_id: int, station_id: int) -> Prediction:
         target_datetime=result["target_datetime"],
         model_version=result["model_version"],
     )
+    # Same as forecast_crowd above: attach the random_forest/xgboost
+    # breakdown that predict_delay() already computes but that has no
+    # DB column to live in, so the API response can carry it too.
+    record.models = result.get("models", {})
+    return record
 
 def recommend_train_frequency(db: Session, station_id: int, is_peak_hour: bool = False) -> Prediction:
     """Train frequency recommendations / resource utilization optimization."""
@@ -141,7 +152,7 @@ def recommend_train_frequency(db: Session, station_id: int, is_peak_hour: bool =
     if is_peak_hour:
         target = target.replace(hour=9)                                  
     result = _cached_recommend_frequency(station_id, target)
-    return _save_prediction(
+    record = _save_prediction(
         db,
         station_id=station_id,
         prediction_type=PredictionType.FREQUENCY,
@@ -150,6 +161,11 @@ def recommend_train_frequency(db: Session, station_id: int, is_peak_hour: bool =
         target_datetime=result["target_datetime"],
         model_version=result["model_version"],
     )
+    # Same as forecast_crowd above: attach the random_forest/xgboost
+    # breakdown that recommend_frequency() already computes but that
+    # has no DB column to live in, so the API response can carry it too.
+    record.models = result.get("models", {})
+    return record
 
 def traffic_pattern_analysis(db: Session, station_id: int) -> dict:
     """Traffic pattern analysis: 24h predicted demand curve for a station."""
@@ -266,6 +282,46 @@ def smart_recommendations(db: Session, station_id: int) -> list[dict]:
     delay = _cached_predict_delay(db, station_id, dt)
     frequency = _cached_recommend_frequency(station_id, dt)
 
+    # This is the one prediction path the frontend calls automatically
+    # (AIInsights.tsx -> getRecommendations, on every dashboard load and
+    # on every live crowd/delay/station event) rather than only on an
+    # explicit user action like the crowd/delay/frequency POST endpoints
+    # above. Persist the same three predictions those endpoints already
+    # save via _save_prediction, so the Activity Timeline widget (which
+    # just reads the latest rows from this table) actually has real
+    # activity to show instead of always being empty.
+    _save_prediction(
+        db,
+        station_id=station_id,
+        prediction_type=PredictionType.CROWD,
+        predicted_value=crowd["predicted_count"],
+        confidence=crowd["confidence"],
+        target_datetime=crowd["target_datetime"],
+        model_version=crowd["model_version"],
+        commit=False,
+    )
+    _save_prediction(
+        db,
+        station_id=station_id,
+        prediction_type=PredictionType.DELAY,
+        predicted_value=delay["predicted_delay_minutes"],
+        confidence=0.7,
+        target_datetime=delay["target_datetime"],
+        model_version=delay["model_version"],
+        commit=False,
+    )
+    _save_prediction(
+        db,
+        station_id=station_id,
+        prediction_type=PredictionType.FREQUENCY,
+        predicted_value=frequency["recommended_frequency_minutes"],
+        confidence=0.75,
+        target_datetime=frequency["target_datetime"],
+        model_version=frequency["model_version"],
+        commit=False,
+    )
+    db.commit()
+
     recommendations = []
 
     if crowd["predicted_count"] > 800:
@@ -312,3 +368,21 @@ def get_crowd_model_metrics() -> dict:
     from app.ai_engine.prediction.crowd_metrics import compute_crowd_metrics
 
     return compute_crowd_metrics()
+
+def get_delay_model_metrics() -> dict:
+    """New: live evaluation metrics for the production delay model,
+    computed from the real train_operations.csv held-out test split.
+    Same role as get_crowd_model_metrics above; powers the delay
+    section of the AI Prediction dashboard page."""
+    from app.ai_engine.prediction.delay_metrics import compute_delay_metrics
+
+    return compute_delay_metrics()
+
+def get_frequency_model_metrics() -> dict:
+    """New: live evaluation metrics for the production train-frequency
+    recommendation model, computed from the real passenger_flow.csv
+    held-out test split. Same role as get_crowd_model_metrics above;
+    powers the frequency section of the AI Prediction dashboard page."""
+    from app.ai_engine.prediction.frequency_metrics import compute_frequency_metrics
+
+    return compute_frequency_metrics()

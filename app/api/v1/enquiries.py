@@ -1,15 +1,4 @@
-"""Enquiry module. Passengers raise an enquiry (general question,
-ticketing issue, lost & found, safety concern, complaint, suggestion,
-etc.); admins and operators triage and resolve them with a reply the
-passenger reads back on their own "My Enquiries" list.
 
-Visibility is role-scoped inside the service layer, not the route:
-GET /enquiries/ returns every enquiry for admin/operator (the
-management queue) but only the caller's own enquiries for a
-passenger - same for GET /enquiries/{id}, which 404s (not 403, to
-avoid confirming the id exists) if a passenger asks for someone
-else's enquiry.
-"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -20,6 +9,8 @@ from app.enums.user_role import UserRole
 from app.models.user_profile import UserProfile
 from app.schemas.enquiry import EnquiryCreate, EnquiryResolve, EnquiryResponse
 from app.services import enquiry_service
+
+from app.schemas.enquiry import EnquiryCreate, EnquiryResolve, EnquiryResponse, EnquiryStats
 
 router = APIRouter(
     prefix="/enquiries",
@@ -41,6 +32,13 @@ def create_enquiry(
     current_user: UserProfile = Depends(get_current_user),
 ):
     return enquiry_service.create_enquiry(db, payload, user_id=current_user.id)
+
+@router.get("/stats/summary", response_model=EnquiryStats)
+def get_enquiry_stats(
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+):
+    return enquiry_service.get_enquiry_stats(db, current_user)
 
 @router.get("/{enquiry_id}", response_model=EnquiryResponse)
 def get_enquiry(

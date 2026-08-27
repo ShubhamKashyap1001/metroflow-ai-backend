@@ -22,19 +22,25 @@ router = APIRouter(
 def get_notifications(
     source: NotificationSource | None = None,
     unread_only: bool = False,
+    state: str | None = None,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
     """Last 7 days only - see NOTIFICATION_RETENTION_DAYS in
-    app/services/notification_service.py."""
-    return notification_service.list_notifications(db, current_user, source, unread_only)
+    app/services/notification_service.py. `state` narrows
+    region-tagged rows to that state (untagged/global rows always
+    still show) - same filter pattern as every other list endpoint."""
+    return notification_service.list_notifications(
+        db, current_user, source, unread_only, state
+    )
 
 @router.get("/unread-count", response_model=NotificationUnreadCount)
 def get_unread_count(
+    state: str | None = None,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    return {"unread": notification_service.unread_count(db, current_user)}
+    return {"unread": notification_service.unread_count(db, current_user, state)}
 
 @router.patch("/{notification_id}/read", response_model=NotificationResponse)
 def read_notification(

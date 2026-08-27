@@ -1,14 +1,17 @@
 
+import logging
 from datetime import datetime, time
 from typing import Callable
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core import cache
 from app.core.config import settings
 from app.enums.day_type import DayType
+from app.enums.notification_source import NotificationSource
 from app.enums.schedule_status import ScheduleStatus
+from app.models.line_station import LineStation
 from app.models.station import Station
 from app.models.train import Train
 from app.models.train_schedule import TrainSchedule
@@ -18,9 +21,19 @@ from app.schemas.train_schedule import (
     TrainScheduleCreate,
     TrainScheduleUpdate,
 )
+from app.services import notification_service
 from app.utils.geo import cities_for_state
 from app.websocket.events import DELAY_ALERT
 from app.websocket.manager import manager
+
+logger = logging.getLogger(__name__)
+
+# Below this, a delay isn't worth interrupting every passenger's bell
+# feed for - the live `delay_alert` socket event (used by the
+# Dispatch Board / delay banners) still fires for every delay
+# regardless, this threshold only gates the persisted Notification
+# Center row.
+DELAY_NOTIFICATION_THRESHOLD_MINUTES = 5
 
 def _scope_to_state(query, state: str | None):
     """Joins in Station and filters to a state's cities, if requested."""
@@ -100,6 +113,133 @@ def list_schedules(
         return query.order_by(TrainSchedule.arrival_time).all()
 
     return _cached_schedule_list(cache_key, _compute)
+
+def _current_day_type() -> DayType:
+    """Saturday/Sunday -> WEEKEND, else WEEKDAY. Schedules only carry a
+    time-of-day (no date), so "today" is resolved this way rather than
+    against a specific calendar date - matches how list_schedules'
+    day_type filter is meant to be used."""
+    return DayType.WEEKEND if datetime.now().weekday() >= 5 else DayType.WEEKDAY
+
+def _station_line_info(station: Station | None) -> tuple[str | None, str | None]:
+    """(line_name, line_color) for a station, resolved the same way as
+    app/services/station_service.py::_attach_line_info - Station has
+    no line_name/line_color columns of its own, that info lives on
+    MetroLine via the line_stations join table. Picks the first
+    associated line; every station in the current dataset belongs to
+    exactly one."""
+    if station is None:
+        return None, None
+    link = station.metro_lines[0] if station.metro_lines else None
+    if not link or not link.line:
+        return None, None
+    return link.line.line_name, link.line.color
+
+def get_upcoming_schedules(
+    db: Session,
+    state: str | None = None,
+    status: ScheduleStatus | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Feed for the "Upcoming Train Schedule" widget: each row is one
+    train's next stop from now, with the stop right after it (in that
+    same train's timetable) as "To" - not a separate route table, this
+    project doesn't have one, so consecutive same-train schedule rows
+    in time order stand in for the route. `state` scopes to one
+    city/state the same way every other schedule endpoint does.
+
+    Defensive by design: this backs a dashboard widget, not a critical
+    workflow, so any unexpected failure here is logged and swallowed
+    (returns []) instead of bubbling into a 500 - a widget that
+    silently shows "no data" is a much better failure mode than one
+    that breaks the CORS response and shows as a confusing "can't
+    reach the server" network error in the browser.
+    """
+    try:
+        day_type = _current_day_type()
+        now_t = datetime.now().time()
+
+        base = (
+            db.query(TrainSchedule)
+            .join(Station, Station.id == TrainSchedule.station_id)
+            .options(
+                joinedload(TrainSchedule.station)
+                .joinedload(Station.metro_lines)
+                .joinedload(LineStation.line)
+            )
+            .filter(TrainSchedule.day_type == day_type)
+        )
+        cities = cities_for_state(state)
+        if cities:
+            base = base.filter(Station.city.in_(cities))
+        if status:
+            base = base.filter(TrainSchedule.status == status)
+
+        upcoming = (
+            base.filter(TrainSchedule.departure_time >= now_t)
+            .order_by(TrainSchedule.departure_time.asc())
+            .limit(limit)
+            .all()
+        )
+        if not upcoming:
+            # Nothing left for the rest of today under this filter -
+            # fall back to the day's earliest matches so the widget
+            # isn't empty right after the last train of the day departs.
+            upcoming = base.order_by(TrainSchedule.departure_time.asc()).limit(limit).all()
+
+        train_ids = {s.train_id for s in upcoming}
+        if not train_ids:
+            return []
+
+        # Full same-day timetable for just these trains, to find each
+        # picked row's next stop.
+        timetable_rows = (
+            db.query(TrainSchedule)
+            .filter(TrainSchedule.train_id.in_(train_ids), TrainSchedule.day_type == day_type)
+            .order_by(TrainSchedule.departure_time.asc())
+            .all()
+        )
+        by_train: dict[int, list[TrainSchedule]] = {}
+        for row in timetable_rows:
+            by_train.setdefault(row.train_id, []).append(row)
+
+        trains = {t.id: t for t in db.query(Train).filter(Train.id.in_(train_ids)).all()}
+
+        results = []
+        for s in upcoming:
+            siblings = by_train.get(s.train_id, [])
+            idx = next((i for i, r in enumerate(siblings) if r.id == s.id), None)
+            next_stop = (
+                siblings[idx + 1] if idx is not None and idx + 1 < len(siblings) else None
+            )
+            train = trains.get(s.train_id)
+            station = getattr(s, "station", None)
+            next_station = getattr(next_stop, "station", None) if next_stop else None
+            line_name, line_color = _station_line_info(station)
+            results.append(
+                {
+                    "id": s.id,
+                    "train_id": s.train_id,
+                    "train_number": train.train_number if train else f"#{s.train_id}",
+                    "from_station_id": s.station_id,
+                    "from_station_name": station.station_name if station else "Unknown",
+                    "line_name": line_name,
+                    "line_color": line_color,
+                    "to_station_name": next_station.station_name if next_station else None,
+                    "departure_time": s.departure_time.isoformat(),
+                    "status": s.status,
+                    "delay_minutes": s.delay_minutes,
+                }
+            )
+        return results
+    except Exception:
+        logger.exception(
+            "get_upcoming_schedules failed (state=%r, status=%r) - returning empty list",
+            state,
+            status,
+        )
+        return []
+
 
 def get_schedule(db: Session, schedule_id: int) -> TrainSchedule:
     schedule = db.get(TrainSchedule, schedule_id)
@@ -192,6 +332,17 @@ def handle_delay(db: Session, schedule_id: int, payload: DelayUpdate) -> TrainSc
         "delay_minutes": schedule.delay_minutes,
         "status": schedule.status.value,
     })
+
+    if schedule.delay_minutes >= DELAY_NOTIFICATION_THRESHOLD_MINUTES:
+        train_label = train.train_number if train else f"Train #{schedule.train_id}"
+        station_label = station.station_name if station else f"Station #{schedule.station_id}"
+        notification_service.create_notification(
+            db,
+            source=NotificationSource.SYSTEM,
+            title=f"Delay - {train_label}",
+            message=f"{train_label} is running {schedule.delay_minutes} min late at {station_label}.",
+            state=station.city if station else None,
+        )
 
     return schedule
 

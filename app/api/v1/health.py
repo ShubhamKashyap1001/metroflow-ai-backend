@@ -8,6 +8,7 @@ from app.core import cache
 from app.core.config import settings
 from app.database.database import engine
 from app.simulator.scheduler import scheduler_status
+from app.websocket.manager import manager
 
 router = APIRouter(
     prefix="/health",
@@ -32,5 +33,6 @@ def health_check():
         "scheduler": scheduler_status(),
                                                                  
         "redis": cache.redis_status(),
+        "websocket_connections": len(manager.active_connections),
         "timestamp": datetime.utcnow(),
     }

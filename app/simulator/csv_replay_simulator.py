@@ -59,15 +59,19 @@ from sqlalchemy.orm import Session
 
 from app.enums.crowd_level import CrowdLevel
 from app.enums.journey_status import JourneyStatus
+from app.enums.notification_source import NotificationSource
 from app.models.crowd_log import CrowdLog
 from app.models.journey import Journey
 from app.models.station import Station
+from app.services import notification_service
 from app.websocket.events import CROWD_UPDATE
 from app.websocket.manager import manager
 
 CSV_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "datasets", "passenger_flow.csv"
+    os.path.dirname(__file__), "..", "..", "datasets", "passenger_flow.csv.gz"
 )
+# Gzipped to stay under GitHub's 100MB file limit; pd.read_csv below
+# infers the compression from the ".gz" extension automatically.
 COL_STATION_ID = "station_id"                                              
 COL_TIMESTAMP = "timestamp"
 COL_ENTRIES = "entries"
@@ -90,6 +94,15 @@ _stations_cache_at: float = 0.0
                                                                       
 _STATIONS_CACHE_TTL_SECONDS = 600
 
+# Overcrowding -> Notification Center bridge. A station can sit at
+# CRITICAL for many ticks in a row (this replay runs every few
+# seconds), so this isn't "notify every tick" - it's "notify once per
+# cooldown window per station", reset as soon as the station drops
+# back below CRITICAL so the next critical spell notifies promptly
+# again instead of inheriting an old cooldown.
+_last_critical_notified_at: dict[int, float] = {}
+CRITICAL_NOTIFY_COOLDOWN_SECONDS = 900
+
 def _load_stations(db: Session) -> list[dict]:
     global _stations_cache, _stations_cache_at
     now = time.monotonic()
@@ -103,6 +116,7 @@ def _load_stations(db: Session) -> list[dict]:
             "station_code": s.station_code,
             "station_name": s.station_name,
             "capacity": s.capacity,
+            "city": s.city,
         }
         for s in rows
     ]
@@ -215,6 +229,24 @@ def _tick_sync(db: Session) -> list[dict]:
             "crowd_level": level,
             "source_timestamp": str(row[COL_TIMESTAMP]),                                                           
         })
+
+        if level == CrowdLevel.CRITICAL:
+            now = time.monotonic()
+            last_notified = _last_critical_notified_at.get(station["id"], 0.0)
+            if now - last_notified >= CRITICAL_NOTIFY_COOLDOWN_SECONDS:
+                _last_critical_notified_at[station["id"]] = now
+                notification_service.create_notification(
+                    db,
+                    source=NotificationSource.SYSTEM,
+                    title=f"Overcrowding - {station['station_name']}",
+                    message=(
+                        f"{station['station_name']} is critically overcrowded "
+                        f"({count}/{capacity or 'unknown capacity'} passengers)."
+                    ),
+                    state=station["city"] if station.get("city") else None,
+                )
+        else:
+            _last_critical_notified_at.pop(station["id"], None)
 
     if updates:
         db.commit()

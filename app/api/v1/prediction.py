@@ -22,6 +22,7 @@ from app.schemas.prediction import (
     DemandForecastRequest,
     FrequencyRecommendationRequest,
     PredictionResponse,
+    RegressionModelMetrics,
     SmartRecommendation,
 )
 from app.services import prediction_service
@@ -78,6 +79,18 @@ def predict_delay(
     """Delay impact prediction."""
     return prediction_service.forecast_delay(db, payload.train_id, payload.station_id)
 
+@router.get("/delay/metrics", response_model=RegressionModelMetrics)
+@limiter.limit("20/minute")
+def delay_model_metrics(
+    request: Request,
+    current_user: UserProfile = Depends(get_current_user),
+):
+    """New: live evaluation metrics for the production delay model -
+    MAE/MAPE/R2 and feature importance, computed from the real
+    train_operations.csv held-out test set. Powers the AI Prediction
+    dashboard page."""
+    return prediction_service.get_delay_model_metrics()
+
 @router.post("/frequency", response_model=PredictionResponse)
 @limiter.limit("20/minute")
 def recommend_frequency(
@@ -88,6 +101,18 @@ def recommend_frequency(
 ):
     """Train frequency recommendations / resource utilization optimization."""
     return prediction_service.recommend_train_frequency(db, payload.station_id, payload.is_peak_hour)
+
+@router.get("/frequency/metrics", response_model=RegressionModelMetrics)
+@limiter.limit("20/minute")
+def frequency_model_metrics(
+    request: Request,
+    current_user: UserProfile = Depends(get_current_user),
+):
+    """New: live evaluation metrics for the production train-frequency
+    recommendation model - MAE/MAPE/R2 and feature importance, computed
+    from the real passenger_flow.csv held-out test set. Powers the AI
+    Prediction dashboard page."""
+    return prediction_service.get_frequency_model_metrics()
 
 @router.get("/traffic-pattern/{station_id}")
 @limiter.limit("20/minute")

@@ -1,12 +1,9 @@
-"""Milestone 2 - Scheduling Management Module API.
-
-Train schedule management, peak-hour optimization, frequency
-adjustment, delay handling. (`app/api/v1/schedules.py` is an older,
-Supabase-based file kept for reference but not wired into the app -
-see app/main.py.)
-"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+
+from app.enums.day_type import DayType
+from app.enums.schedule_status import ScheduleStatus
+from app.enums.user_role import UserRole
 
 from app.core.security import require_roles
 from app.database.session import get_db
@@ -54,6 +51,18 @@ def delayed_schedules(
 ):
     """Delay handling: currently delayed schedule entries."""
     return schedule_service.delayed_schedules(db, station_id, state)
+
+@router.get("/upcoming")
+def upcoming_schedules(
+    state: str | None = None,
+    status: ScheduleStatus | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    """Feed for the dashboard's "Upcoming Train Schedule" widget - next
+    departures with train, line, from/to stations and live status.
+    `state` scopes to one city, `status` filters to on_time/delayed."""
+    return schedule_service.get_upcoming_schedules(db, state, status, limit)
 
 @router.get("/{schedule_id}", response_model=TrainScheduleResponse)
 def get_schedule(schedule_id: int, db: Session = Depends(get_db)):
