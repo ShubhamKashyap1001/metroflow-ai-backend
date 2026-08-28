@@ -1,19 +1,3 @@
-"""Admin bootstrap script: promotes an already-signed-up Supabase user
-to a given role (admin/operator/passenger) in `user_profiles`.
-
-Why this exists: sign-up itself happens on Supabase (frontend), and
-every API route that changes a role requires you to *already* be an
-admin - so the very first admin has to be created by someone with
-direct database access. This script does that, by reading the user's
-id straight out of Supabase's own `auth.users` table (safe: it's the
-same Postgres database, just a different schema, and we only SELECT
-from it).
-
-Usage:
-    python -m app.database.set_user_role someone@example.com admin
-    python -m app.database.set_user_role someone@example.com operator
-    python -m app.database.set_user_role someone@example.com passenger
-"""
 import sys
 
 from sqlalchemy import text

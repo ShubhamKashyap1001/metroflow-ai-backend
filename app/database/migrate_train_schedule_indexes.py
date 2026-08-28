@@ -1,28 +1,4 @@
-"""One-off migration to add the three indexes declared on
-TrainSchedule.__table_args__ (app/models/train_schedule.py):
 
-    ix_train_schedules_station_id_day_type
-    ix_train_schedules_station_id_status
-    ix_train_schedules_train_id
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. If your
-`train_schedules` table was created before this update, run this once
-so schedule_service.py's list_schedules() / peak_hour_schedules() /
-delayed_schedules() cache-miss path (every SCHEDULE_CACHE_TTL_SECONDS,
-per distinct filter combination) stops doing a full table scan:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_train_schedule_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on train_schedules while building (relevant here
-since handle_delay()/adjust_frequency() write to it) - note that
-CONCURRENTLY can't run inside a transaction block, hence the
-isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

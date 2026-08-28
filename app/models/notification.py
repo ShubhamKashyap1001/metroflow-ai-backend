@@ -1,31 +1,3 @@
-"""Notification Center module - what the bell icon in the header opens.
-
-Distinct from `NotificationLog` (app/models/notification_log.py),
-which is a low-level per-recipient email/SMS delivery audit row for a
-single Alert. This table is the human-facing feed: one row per thing
-worth showing a user in their bell dropdown, tagged by `source` so the
-UI can filter/tab between them:
-
-  - EMAIL           an email notification was dispatched (see
-                     app/services/alert_service.py's dispatch calls)
-  - OPERATOR        an operator/admin raised a station alert
-                     (overcrowding/delay/emergency/maintenance/info)
-  - SYSTEM          a system-level announcement - e.g. a published
-                     News item (see app/services/news_service.py)
-  - SYSTEM_FAILURE  an infrastructure problem the backend itself
-                     detected - e.g. the DB pool exhaustion handler in
-                     app/main.py
-
-`user_id = NULL` means "broadcast to everyone" (used for operator
-alerts, system announcements, and system failures - anything that
-isn't specific to one person). A non-null `user_id` scopes it to that
-one user only.
-
-Retention is enforced at read time, not by deleting rows:
-list_notifications() only ever returns rows from the last
-`NOTIFICATION_RETENTION_DAYS` (7) days - see
-app/services/notification_service.py.
-"""
 from sqlalchemy import Boolean
 from sqlalchemy import Enum
 from sqlalchemy import ForeignKey

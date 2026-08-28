@@ -1,10 +1,3 @@
-"""Service layer for the Notification Center (the bell icon).
-
-Retention is enforced by never querying past NOTIFICATION_RETENTION_DAYS,
-not by deleting rows - simplest possible "notifications older than 7
-days disappear" behaviour, and it means nothing has to run a cron/
-background job for it to work correctly.
-"""
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 

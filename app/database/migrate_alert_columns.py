@@ -1,24 +1,4 @@
-"""One-off migration for the new Alert columns (available_until,
-notify_email, notify_sms).
 
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never alters an existing one. If your `alerts` table already
-exists (i.e. you ran init_db.py before this update), run this once to
-add the new columns without losing existing data:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_alert_columns
-
-Safe to run more than once - every statement is IF NOT EXISTS. If you
-still see `column "available_until" does not exist` in the API logs
-after running this, the most likely cause is that this script and the
-running `uvicorn` process are pointed at two different databases (e.g.
-a local Postgres vs. a hosted one) - compare the "Connecting to"
-line this script prints against DATABASE_URL in the .env the backend
-is actually running with.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

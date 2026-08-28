@@ -1,7 +1,3 @@
-"""Generates a demo metro network (lines, stations, trains) used by
-`app/database/seed.py`. Centralized here so the simulator and the
-seed script share the same station list/ids.
-"""
 
 DEMO_STATIONS = [
     {"station_code": "STN01", "station_name": "Central Station", "city": "Metro City",

@@ -1,10 +1,3 @@
-"""SMTP email dispatch for the Alert & Notification Module.
-
-Uses a generic SMTP connection - works with Gmail (App Password),
-SendGrid SMTP relay, Mailgun, AWS SES SMTP, etc. No third-party SDK
-needed since smtplib/email are part of the Python standard library,
-so nothing new to add to requirements.txt.
-"""
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart

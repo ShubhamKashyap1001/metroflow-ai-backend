@@ -1,28 +1,4 @@
-"""Loads your REAL datasets (stations.csv, trains.csv, passenger_flow.csv,
-train_operations.csv) into Postgres, so the frontend shows real
-stations/cities/crowd/delay numbers instead of the synthetic demo
-network from app/database/seed.py.
 
-This is the 2nd-generation dataset: stations.csv, passenger_flow.csv
-and train_operations.csv all carry a real `station_id` string
-(e.g. "STN-DEL-YL-02"), and trains.csv/train_operations.csv both
-carry a real `train_id` string (e.g. "TRN-AMD-BL-01") - so joins here
-are exact string-key matches, not fuzzy (city, name) matching like
-the previous generation needed.
-
-This is a plain data-cleaning + DB-insert script - no model training,
-no scikit-learn import, nothing CPU-heavy. Safe to run on your laptop.
-
-Usage:
-    1. Put the 4 CSVs in a `datasets/` folder at the backend repo root
-       (same folder this script looks for them in by default), or pass
-       a different folder with --dir.
-    2. From the backend repo root:
-           python -m app.database.seed_real_data --reset
-       (--reset wipes any previously-seeded data first - required if
-       you're moving from the old dataset generation, since station_id
-       values are shaped completely differently now)
-"""
 import argparse
 import os
 from datetime import date, datetime

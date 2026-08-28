@@ -1,15 +1,4 @@
-"""SMS dispatch for the Alert & Notification Module, via Twilio's REST
-API. Uses Twilio because it's the most widely available SMS provider
-with a free trial, and its API is a single authenticated POST request
-- so this uses Python's built-in urllib instead of adding the twilio
-SDK as a new dependency.
 
-Needs a Twilio account (https://www.twilio.com/try-twilio): the
-Account SID, Auth Token, and a Twilio phone number to send from, all
-set in .env (see TWILIO_* below). Without those set, this degrades
-the same way app/core/email.py does when SMTP isn't configured - it
-logs "not configured" per recipient instead of raising.
-"""
 import base64
 import urllib.error
 import urllib.parse
