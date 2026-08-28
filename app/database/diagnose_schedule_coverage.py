@@ -1,12 +1,3 @@
-"""Diagnostic: how many train_schedules rows exist per city, and for
-today's day_type. Run this to check whether "No departures found for
-<city>" is a real data-coverage gap (seed data has no schedule rows
-for that city's stations) vs a bug.
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate
-    python -m app.database.diagnose_schedule_coverage
-"""
 from collections import Counter
 from datetime import datetime
 

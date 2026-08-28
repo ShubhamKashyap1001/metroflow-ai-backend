@@ -1,17 +1,4 @@
-"""One-off migration for the new UserProfile.username column.
 
-Same situation as migrate_alert_columns.py - this project has no
-Alembic, so Base.metadata.create_all() never alters a `user_profiles`
-table that already exists. If you already had users signing up before
-this update, run this once:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_username_column
-
-Safe to run more than once (IF NOT EXISTS). Starting fresh with a new
-database? You don't need this - init_db.py already creates the column.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

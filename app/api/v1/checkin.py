@@ -1,5 +1,3 @@
-"""Passenger entry (check-in) - source of the "Passenger Entry & Exit
-Records" dataset, and drives live crowd counts."""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 

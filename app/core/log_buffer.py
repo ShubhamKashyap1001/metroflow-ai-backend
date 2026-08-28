@@ -1,14 +1,4 @@
-"""In-memory ring buffer of recent application log records.
 
-This is wired up as a `logging.Handler` on the root logger (see
-`install()`, called once from app/main.py at startup), so every entry
-returned by `get_recent_logs()` is a genuine record the process itself
-emitted - the crowd/train simulators, request handlers, the scheduler,
-uvicorn, etc. Nothing here is synthesized: /admin/logs is a read-only
-window onto whatever the app actually logged, capped to the last
-MAX_LOG_ENTRIES records so memory stays bounded on a long-running
-process.
-"""
 import logging
 from collections import deque
 from datetime import datetime, timezone

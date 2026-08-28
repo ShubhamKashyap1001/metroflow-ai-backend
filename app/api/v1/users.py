@@ -1,4 +1,3 @@
-"""Milestone 1 - User Management Module: profile management, RBAC."""
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,9 +20,7 @@ def get_users(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN)),
 ):
-    """Every real user profile - excludes the simulator's virtual
-    passenger pool (see app/simulator/live_simulator.py), which would
-    otherwise clutter this list with 40+ "Simulated Passenger" rows."""
+
     return (
         db.query(UserProfile)
         .filter(~UserProfile.email.like(f"%@{SIMULATED_EMAIL_DOMAIN}"))

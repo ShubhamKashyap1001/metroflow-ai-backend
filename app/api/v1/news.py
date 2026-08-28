@@ -1,9 +1,3 @@
-"""News & Announcements module. Admins/operators publish "latest
-news" items (service updates, general announcements); every
-authenticated user (passenger included) reads the published feed.
-Separate from the Alert module (station-scoped, email/SMS-dispatched
-incident alerts) - this is lightweight, unscoped announcements.
-"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 

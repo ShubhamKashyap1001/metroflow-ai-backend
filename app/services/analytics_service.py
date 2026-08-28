@@ -116,23 +116,7 @@ def passenger_flow_overview(
     state: str | None = None,
     top_n: int = 8,
 ) -> dict:
-    """Powers the "Passenger Flow by Station" chart, the four KPI cards,
-    and the "Ridership by Line" donut on the Analytics page.
-
-    Entries/exits are derived the same way crowd_service.get_inflow_outflow
-    already derives them for a single station - consecutive CrowdLog
-    samples rising = passengers entering, falling = passengers exiting -
-    just run for every station in `state` at once instead of one at a
-    time, and summed/grouped for the KPI totals, per-station chart rows,
-    and per-line ridership breakdown.
-
-    `hours` is deliberately a short rolling window by default at the call
-    site (0.5 = last 30 minutes), not a 24h cumulative one: with a 24h
-    cumulative denominator, one more 5-second simulator tick barely moves
-    the total at all, so the KPI cards and chart looked frozen even
-    though fresh data was arriving continuously. A short window makes
-    each new sample a visible fraction of the total instead.
-    """
+    
     since = datetime.utcnow() - timedelta(hours=hours)
     cities = cities_for_state(state)
 

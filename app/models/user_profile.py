@@ -1,11 +1,3 @@
-"""Mirrors Supabase's `auth.users` table 1:1 by id. Supabase owns the
-actual credentials (email + password hash) in its own `auth` schema -
-we never store a password here. This table only exists to attach
-app-specific fields (role, phone, avatar) to a Supabase user id.
-
-Rows are created lazily on first authenticated request - see
-`app/core/security.py::_get_or_create_profile`.
-"""
 from sqlalchemy import Boolean
 from sqlalchemy import Enum
 from sqlalchemy import String

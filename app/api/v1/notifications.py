@@ -1,8 +1,4 @@
-"""Notification Center. Every authenticated user gets a feed of
-what's happened in the last 7 days that's relevant to them - email
-dispatch notices, operator-raised alerts, system announcements, and
-system failure notices - behind the bell icon in the header.
-"""
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 

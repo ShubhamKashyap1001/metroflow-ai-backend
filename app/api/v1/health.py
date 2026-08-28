@@ -1,4 +1,3 @@
-"""Health check - used by Docker/cloud deployment liveness & readiness probes."""
 from datetime import datetime
 
 from fastapi import APIRouter

@@ -1,10 +1,3 @@
-"""Per-recipient delivery record for the Alert & Notification Module.
-
-One row per (alert, channel, recipient) triple, so the Alerts page can
-show exactly who was notified on which channel (email/SMS), who
-wasn't, and why - instead of the create endpoint silently succeeding
-or failing on dispatch with no audit trail.
-"""
 from datetime import datetime
 
 from sqlalchemy import DateTime

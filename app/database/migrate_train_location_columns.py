@@ -1,19 +1,4 @@
-"""One-off migration for the new TrainLocation live-tracking columns
-(next_station_id, progress_ratio, status) and the train_id unique
-constraint.
 
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never alters an existing one. If your `train_locations` table
-already existed before this update, run this once to add the new
-columns without losing data:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_train_location_columns
-
-Safe to run more than once - every statement is IF NOT EXISTS / guarded.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

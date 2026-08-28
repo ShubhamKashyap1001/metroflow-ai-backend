@@ -8,11 +8,6 @@ from app.schemas.station import StationCreate, StationUpdate
 from app.utils.geo import cities_for_state
 
 def _attach_line_info(stations: list[Station]) -> list[Station]:
-    """Bolts line_name/line_color/station_order onto each Station
-    instance from its metro_lines/line_stations join (see
-    StationResponse) - not persisted, just read for this response.
-    Picks the first associated line; every station in the current
-    dataset belongs to exactly one."""
     for station in stations:
         link = station.metro_lines[0] if station.metro_lines else None
         station.line_name = link.line.line_name if link else None

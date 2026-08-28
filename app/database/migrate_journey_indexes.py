@@ -1,30 +1,4 @@
-"""One-off migration to add the four composite indexes declared on
-Journey.__table_args__ (app/models/journey.py):
 
-    ix_journeys_user_id_status
-    ix_journeys_status_checkin_time
-    ix_journeys_source_station_id_status
-    ix_journeys_destination_station_id_status
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. If your
-`journeys` table was created before this update, run this once so the
-hot journey queries (duplicate-active-journey check, the live/CSV
-simulators' checkout sweeps, per-station active-journey counts, etc. -
-see the comment above Journey.__table_args__ for the full list) stop
-doing a full table scan of an ever-growing table:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_journey_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on journeys while building (relevant here since
-check-in/check-out and the simulators write to it constantly) - note
-that CONCURRENTLY can't run inside a transaction block, hence the
-isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

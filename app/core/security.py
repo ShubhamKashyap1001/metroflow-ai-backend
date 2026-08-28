@@ -1,16 +1,4 @@
-"""Auth is fully delegated to Supabase now.
 
-The frontend calls `supabase.auth.signInWithPassword()` /
-`supabase.auth.signUp()` directly and gets back a Supabase-issued
-JWT. This backend never sees a password - it only ever verifies the
-JWT Supabase already issued, then looks up (or lazily creates) the
-matching row in `user_profiles` for role-based access control.
-
-Supports both Supabase JWT signing modes:
-  - Legacy HS256 shared secret (set SUPABASE_JWT_SECRET in .env)
-  - Newer asymmetric signing keys, verified via the project's JWKS
-    endpoint (used automatically if SUPABASE_JWT_SECRET is empty)
-"""
 import json
 import time
 import urllib.request
