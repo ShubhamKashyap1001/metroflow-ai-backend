@@ -22,8 +22,9 @@ from app.schemas.train_schedule import (
     TrainScheduleUpdate,
 )
 from app.services import notification_service
+from app.services.train_tracking import invalidate_route_cache
 from app.utils.geo import cities_for_state
-from app.websocket.events import DELAY_ALERT
+from app.websocket.events import DELAY_ALERT, SCHEDULE_UPDATE
 from app.websocket.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,24 @@ logger = logging.getLogger(__name__)
 # regardless, this threshold only gates the persisted Notification
 # Center row.
 DELAY_NOTIFICATION_THRESHOLD_MINUTES = 5
+
+# BUGFIX (expensive train/schedule queries): list_schedules,
+# peak_hour_schedules, and delayed_schedules all ran `.all()` with no
+# limit/offset at all - every Dispatch Board load (list_schedules is
+# the single most-hit read on this router) pulled EVERY matching
+# train_schedules row into memory and serialized it as one JSON
+# response, growing linearly as more trains/stations get seeded. Same
+# shape as the alert_service.py Phase 9 fix (DEFAULT_*_LIMIT/
+# MAX_*_LIMIT + a hard-clamped offset/limit), applied here for the
+# same reason: a default page size for normal callers, a hard upper
+# bound so a caller can't force an unbounded fetch.
+DEFAULT_SCHEDULE_LIST_LIMIT = 200
+MAX_SCHEDULE_LIST_LIMIT = 1000
+
+def _clamp(value: int | None, default: int, maximum: int) -> int:
+    if value is None:
+        value = default
+    return min(max(value, 1), maximum)
 
 def _scope_to_state(query, state: str | None):
     """Joins in Station and filters to a state's cities, if requested."""
@@ -46,8 +65,9 @@ def _scope_to_state(query, state: str | None):
 
 _SCHEDULE_FIELDS = (
     "id", "train_id", "station_id", "arrival_time", "departure_time",
-    "platform_number", "day_type", "is_peak_hour", "frequency_minutes",
-    "status", "delay_minutes", "actual_arrival_time", "actual_departure_time",
+    "platform_number", "station_sequence", "day_type", "is_peak_hour",
+    "frequency_minutes", "status", "delay_minutes", "actual_arrival_time",
+    "actual_departure_time",
 )
 
 def _serialize_schedule(s: TrainSchedule) -> dict:
@@ -92,14 +112,25 @@ def list_schedules(
     train_id: int | None = None,
     day_type: DayType | None = None,
     state: str | None = None,
+    limit: int = DEFAULT_SCHEDULE_LIST_LIMIT,
+    offset: int = 0,
 ) -> list[TrainSchedule]:
     """General schedule listing - the most-hit read on this router (every
     schedule-board load/refresh), but previously the only one of the
     three read paths here with zero caching (peak_hour_schedules/
     delayed_schedules already cached, this one still hit Postgres on
     every call). Cached the same way, keyed on the full filter set so
-    different station/train/day/state combinations don't collide."""
-    cache_key = f"schedule:list:{station_id}:{train_id}:{day_type.value if day_type else None}:{state}"
+    different station/train/day/state combinations don't collide.
+
+    BUGFIX (expensive train/schedule queries): also previously had no
+    limit/offset - see DEFAULT_SCHEDULE_LIST_LIMIT/MAX_SCHEDULE_LIST_LIMIT
+    above."""
+    limit = _clamp(limit, DEFAULT_SCHEDULE_LIST_LIMIT, MAX_SCHEDULE_LIST_LIMIT)
+    offset = max(offset or 0, 0)
+    cache_key = (
+        f"schedule:list:{station_id}:{train_id}:"
+        f"{day_type.value if day_type else None}:{state}:{limit}:{offset}"
+    )
 
     def _compute() -> list[TrainSchedule]:
         query = db.query(TrainSchedule)
@@ -110,7 +141,7 @@ def list_schedules(
         if day_type:
             query = query.filter(TrainSchedule.day_type == day_type)
         query = _scope_to_state(query, state)
-        return query.order_by(TrainSchedule.arrival_time).all()
+        return query.order_by(TrainSchedule.arrival_time).offset(offset).limit(limit).all()
 
     return _cached_schedule_list(cache_key, _compute)
 
@@ -156,47 +187,112 @@ def get_upcoming_schedules(
     reach the server" network error in the browser.
     """
     try:
+        # BUGFIX (expensive train/schedule queries): `limit` was passed
+        # straight through into `limit * 50` below with no clamp - a
+        # caller passing a large `limit` turned into an equally large,
+        # unbounded `LIMIT`/sort on train_schedules. Same clamp pattern
+        # as the rest of this module.
+        limit = _clamp(limit, 20, MAX_SCHEDULE_LIST_LIMIT)
         day_type = _current_day_type()
         now_t = datetime.now().time()
 
-        base = (
-            db.query(TrainSchedule)
-            .join(Station, Station.id == TrainSchedule.station_id)
-            .options(
-                joinedload(TrainSchedule.station)
-                .joinedload(Station.metro_lines)
-                .joinedload(LineStation.line)
-            )
-            .filter(TrainSchedule.day_type == day_type)
-        )
+        # PERF FIX (query-analysis pass, see docs/query-performance-and-indexing.md):
+        # this used to unconditionally `.join(Station, ...)` just to be
+        # able to filter Station.city when a state/city scope was
+        # requested - the same bug class _scope_to_state() above was
+        # already written to avoid elsewhere in this module. That extra
+        # Hash Join ran on every call regardless of whether `state` was
+        # even given, for no benefit in the common (no state filter)
+        # case. Joining Station only when `cities` is actually
+        # non-empty removes that unnecessary join and lets the
+        # ix_train_schedules_day_type_departure_time index do the
+        # day_type/departure_time filtering via an index scan instead
+        # of a full Seq Scan (a Sort can still appear afterward - the
+        # separate joinedload() eager-load joins below don't guarantee
+        # order - but the filter itself is no longer a table scan).
+        base = db.query(TrainSchedule).options(
+            joinedload(TrainSchedule.station)
+            .joinedload(Station.metro_lines)
+            .joinedload(LineStation.line)
+        ).filter(TrainSchedule.day_type == day_type)
+
         cities = cities_for_state(state)
         if cities:
-            base = base.filter(Station.city.in_(cities))
+            base = base.join(Station, Station.id == TrainSchedule.station_id).filter(
+                Station.city.in_(cities)
+            )
         if status:
             base = base.filter(TrainSchedule.status == status)
 
-        upcoming = (
+        def _dedupe_by_train(rows: list[TrainSchedule], cap: int) -> list[TrainSchedule]:
+            """Since the timetable/history split (see
+            app/models/train_schedule_history.py), train_schedules holds
+            exactly one row per (train, station, day_type) slot, so a
+            train legitimately appearing more than once here just means
+            it has more than one upcoming stop in the selected scope -
+            not a data bug. Still cap to one row per train for this
+            widget: it's meant to read as a board of DIFFERENT next
+            departures, and showing the same train's second/third stop
+            further down the list adds noise without adding information
+            (its "next stop" is already shown via the first occurrence).
+            Kept defensive against pre-migration databases too, where a
+            train/station/time slot could still have duplicate rows."""
+            seen: set[int] = set()
+            deduped: list[TrainSchedule] = []
+            for row in rows:
+                if row.train_id in seen:
+                    continue
+                seen.add(row.train_id)
+                deduped.append(row)
+                if len(deduped) >= cap:
+                    break
+            return deduped
+
+        # Pull more raw rows than `limit` before deduping, since most of
+        # them will collapse into the same handful of trains.
+        candidates = (
             base.filter(TrainSchedule.departure_time >= now_t)
             .order_by(TrainSchedule.departure_time.asc())
-            .limit(limit)
+            .limit(limit * 50)
             .all()
         )
+        upcoming = _dedupe_by_train(candidates, limit)
         if not upcoming:
             # Nothing left for the rest of today under this filter -
             # fall back to the day's earliest matches so the widget
             # isn't empty right after the last train of the day departs.
-            upcoming = base.order_by(TrainSchedule.departure_time.asc()).limit(limit).all()
+            candidates = base.order_by(TrainSchedule.departure_time.asc()).limit(limit * 50).all()
+            upcoming = _dedupe_by_train(candidates, limit)
 
         train_ids = {s.train_id for s in upcoming}
         if not train_ids:
             return []
 
         # Full same-day timetable for just these trains, to find each
-        # picked row's next stop.
+        # picked row's next stop. Ordered by station_sequence (the
+        # train's actual route order), NOT departure_time: two different
+        # stations' scheduled times can coincide (and, on pre-migration
+        # data with duplicate historical rows per slot, frequently did -
+        # that's what previously made "next stop" resolve back to the
+        # SAME station instead of the real next one). station_sequence
+        # is unambiguous regardless. Rows from before this column
+        # existed (station_sequence is nullable) sort last within their
+        # train and are simply skipped as a "next stop" candidate below.
+        #
+        # BUGFIX (remaining N+1 query): this query used to have no
+        # eager-load option at all, so `next_stop.station` below (read
+        # for every train's "next stop" name) triggered one extra
+        # lazy-loaded SELECT per row the very first time it was
+        # accessed - up to `limit` (default 20, capped at
+        # MAX_SCHEDULE_LIST_LIMIT) additional round trips on every call
+        # to this dashboard-widget endpoint. `joinedload` here folds
+        # that into the single query above via a JOIN, the same way
+        # `base`'s query already does for `s.station` a few lines up.
         timetable_rows = (
             db.query(TrainSchedule)
+            .options(joinedload(TrainSchedule.station))
             .filter(TrainSchedule.train_id.in_(train_ids), TrainSchedule.day_type == day_type)
-            .order_by(TrainSchedule.departure_time.asc())
+            .order_by(TrainSchedule.station_sequence.asc().nulls_last())
             .all()
         )
         by_train: dict[int, list[TrainSchedule]] = {}
@@ -209,9 +305,16 @@ def get_upcoming_schedules(
         for s in upcoming:
             siblings = by_train.get(s.train_id, [])
             idx = next((i for i, r in enumerate(siblings) if r.id == s.id), None)
-            next_stop = (
-                siblings[idx + 1] if idx is not None and idx + 1 < len(siblings) else None
-            )
+            next_stop = None
+            if idx is not None and s.station_sequence is not None:
+                # Walk forward past any sibling with an equal or lower
+                # station_sequence (shouldn't normally happen post-split,
+                # but guards against stale/pre-migration rows) to the
+                # first one that's a real later stop on the route.
+                for candidate in siblings[idx + 1:]:
+                    if candidate.station_sequence is not None and candidate.station_sequence > s.station_sequence:
+                        next_stop = candidate
+                        break
             train = trains.get(s.train_id)
             station = getattr(s, "station", None)
             next_station = getattr(next_stop, "station", None) if next_stop else None
@@ -273,14 +376,56 @@ def _invalidate_schedule_caches(schedule: TrainSchedule) -> None:
     keys. Per-state-filtered keys are intentionally left to expire via
     TTL alone, same documented tradeoff as before (small enough key
     space, short enough TTL, not worth tracking every state a station's
-    city could be filtered under)."""
-    cache.delete("schedule:list:None:None:None:None")
-    cache.delete(f"schedule:list:None:{schedule.train_id}:None:None")
-    cache.delete(f"schedule:list:{schedule.station_id}:None:None:None")
-    cache.delete("schedule:peak:None:None")
-    cache.delete(f"schedule:peak:{schedule.station_id}:None")
-    cache.delete("schedule:delayed:None:None")
-    cache.delete(f"schedule:delayed:{schedule.station_id}:None")
+    city could be filtered under).
+
+    BUGFIX (expensive train/schedule queries): cache keys now carry the
+    limit/offset the page was cached under (see
+    DEFAULT_SCHEDULE_LIST_LIMIT/MAX_SCHEDULE_LIST_LIMIT above) - only
+    the default (first-page) slice is invalidated here, same tradeoff
+    as the per-state one: a caller paging past the first page gets a
+    stale page for up to SCHEDULE_CACHE_TTL_SECONDS, which is an
+    acceptable staleness window for a page nobody's default dashboard
+    view actually lands on."""
+    default_page = f"{DEFAULT_SCHEDULE_LIST_LIMIT}:0"
+    cache.delete(f"schedule:list:None:None:None:None:{default_page}")
+    cache.delete(f"schedule:list:None:{schedule.train_id}:None:None:{default_page}")
+    cache.delete(f"schedule:list:{schedule.station_id}:None:None:None:{default_page}")
+    cache.delete(f"schedule:peak:None:None:{default_page}")
+    cache.delete(f"schedule:peak:{schedule.station_id}:None:{default_page}")
+    cache.delete(f"schedule:delayed:None:None:{default_page}")
+    cache.delete(f"schedule:delayed:{schedule.station_id}:None:{default_page}")
+
+def _broadcast_schedule_update(db: Session, schedule: TrainSchedule) -> None:
+    """Push a `schedule_update` event over the WebSocket so any open
+    Dispatch Board / Train Scheduling tab reflects a create/update the
+    moment it's committed, instead of waiting on the next
+    SCHEDULE_CACHE_TTL_SECONDS-bounded poll.
+
+    `SCHEDULE_UPDATE` (app/websocket/events.py) was defined and already
+    typed on the frontend (useLiveSocket.ts's `LiveEvent` union) but no
+    call site ever actually emitted it - create_schedule/update_schedule
+    only wrote to Postgres, so a direct schedule create/edit (as opposed
+    to the dedicated handle_delay/adjust_frequency workflows, which DO
+    broadcast) never reached a connected client in real time. Mirrors
+    handle_delay's DELAY_ALERT payload shape/lookups so the frontend can
+    treat this the same way it already treats that event.
+    """
+    train = db.get(Train, schedule.train_id)
+    station = db.get(Station, schedule.station_id)
+    manager.notify(SCHEDULE_UPDATE, {
+        "schedule_id": schedule.id,
+        "train_id": schedule.train_id,
+        "train_number": train.train_number if train else None,
+        "station_id": schedule.station_id,
+        "station_name": station.station_name if station else None,
+        "arrival_time": schedule.arrival_time.isoformat() if schedule.arrival_time else None,
+        "departure_time": schedule.departure_time.isoformat() if schedule.departure_time else None,
+        "platform_number": schedule.platform_number,
+        "status": schedule.status.value if schedule.status else None,
+        "delay_minutes": schedule.delay_minutes,
+        "frequency_minutes": schedule.frequency_minutes,
+        "is_peak_hour": schedule.is_peak_hour,
+    })
 
 def create_schedule(db: Session, payload: TrainScheduleCreate) -> TrainSchedule:
     data = payload.model_dump()
@@ -292,6 +437,16 @@ def create_schedule(db: Session, payload: TrainScheduleCreate) -> TrainSchedule:
     db.add(schedule)
     db.commit()
     db.refresh(schedule)
+
+    # BUGFIX (missing cache invalidation): a newly-created schedule used
+    # to be invisible to list_schedules()/peak_hour_schedules()/
+    # delayed_schedules() for up to SCHEDULE_CACHE_TTL_SECONDS whenever
+    # an earlier request had already warmed the relevant cache key(s) -
+    # the Dispatch Board kept showing the pre-create list. Same fix
+    # shape as handle_delay/adjust_frequency below.
+    _invalidate_schedule_caches(schedule)
+    invalidate_route_cache()
+    _broadcast_schedule_update(db, schedule)
     return schedule
 
 def update_schedule(db: Session, schedule_id: int, payload: TrainScheduleUpdate) -> TrainSchedule:
@@ -300,6 +455,15 @@ def update_schedule(db: Session, schedule_id: int, payload: TrainScheduleUpdate)
         setattr(schedule, field, value)
     db.commit()
     db.refresh(schedule)
+
+    # BUGFIX (missing cache invalidation): same gap as create_schedule -
+    # a direct PUT edit (platform change, retimed departure, etc.) left
+    # every already-cached list/peak/delayed view serving the pre-edit
+    # row until the TTL expired, even though the delay/frequency-specific
+    # workflows on this same model already invalidated correctly.
+    _invalidate_schedule_caches(schedule)
+    invalidate_route_cache()
+    _broadcast_schedule_update(db, schedule)
     return schedule
 
 def handle_delay(db: Session, schedule_id: int, payload: DelayUpdate) -> TrainSchedule:
@@ -373,18 +537,26 @@ def peak_hour_schedules(
     db: Session,
     station_id: int | None = None,
     state: str | None = None,
+    limit: int = DEFAULT_SCHEDULE_LIST_LIMIT,
+    offset: int = 0,
 ) -> list[TrainSchedule]:
     """Peak-hour optimization view: schedules currently flagged as peak.
     Cached (short TTL) - this is a frequently-refreshed dashboard view,
-    same reasoning as the crowd dashboard snapshot."""
-    cache_key = f"schedule:peak:{station_id}:{state}"
+    same reasoning as the crowd dashboard snapshot.
+
+    BUGFIX (expensive train/schedule queries): previously ran `.all()`
+    with no limit/offset - see DEFAULT_SCHEDULE_LIST_LIMIT/
+    MAX_SCHEDULE_LIST_LIMIT above."""
+    limit = _clamp(limit, DEFAULT_SCHEDULE_LIST_LIMIT, MAX_SCHEDULE_LIST_LIMIT)
+    offset = max(offset or 0, 0)
+    cache_key = f"schedule:peak:{station_id}:{state}:{limit}:{offset}"
 
     def _compute() -> list[TrainSchedule]:
         query = db.query(TrainSchedule).filter(TrainSchedule.is_peak_hour.is_(True))
         if station_id:
             query = query.filter(TrainSchedule.station_id == station_id)
         query = _scope_to_state(query, state)
-        return query.order_by(TrainSchedule.arrival_time).all()
+        return query.order_by(TrainSchedule.arrival_time).offset(offset).limit(limit).all()
 
     return _cached_schedule_list(cache_key, _compute)
 
@@ -392,6 +564,8 @@ def delayed_schedules(
     db: Session,
     station_id: int | None = None,
     state: str | None = None,
+    limit: int = DEFAULT_SCHEDULE_LIST_LIMIT,
+    offset: int = 0,
 ) -> list[TrainSchedule]:
     """Delay handling: currently delayed schedule entries - feeds the
     dashboard's "Average Delay" KPI, so this is hit on essentially every
@@ -408,8 +582,14 @@ def delayed_schedules(
     Filter on the actual delay value instead (same pattern already
     used in analytics_service.py), and keep the OR on status so any
     row a human explicitly flagged DELAYED still shows even if
-    delay_minutes hasn't been (re)recorded."""
-    cache_key = f"schedule:delayed:{station_id}:{state}"
+    delay_minutes hasn't been (re)recorded.
+
+    BUGFIX (expensive train/schedule queries): previously ran `.all()`
+    with no limit/offset - see DEFAULT_SCHEDULE_LIST_LIMIT/
+    MAX_SCHEDULE_LIST_LIMIT above."""
+    limit = _clamp(limit, DEFAULT_SCHEDULE_LIST_LIMIT, MAX_SCHEDULE_LIST_LIMIT)
+    offset = max(offset or 0, 0)
+    cache_key = f"schedule:delayed:{station_id}:{state}:{limit}:{offset}"
 
     def _compute() -> list[TrainSchedule]:
         query = db.query(TrainSchedule).filter(
@@ -418,6 +598,6 @@ def delayed_schedules(
         if station_id:
             query = query.filter(TrainSchedule.station_id == station_id)
         query = _scope_to_state(query, state)
-        return query.order_by(TrainSchedule.delay_minutes.desc()).all()
+        return query.order_by(TrainSchedule.delay_minutes.desc()).offset(offset).limit(limit).all()
 
     return _cached_schedule_list(cache_key, _compute)

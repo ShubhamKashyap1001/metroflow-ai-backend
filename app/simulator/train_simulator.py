@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.core import cache
 from app.models.station import Station
 from app.models.train import Train
 from app.models.train_location import TrainLocation
@@ -12,10 +13,34 @@ from app.services.train_tracking import (
     segment_index_for,
     speed_factor_for,
 )
+from app.utils.geo import STATE_CITY_MAP
 from app.websocket.events import TRAIN_POSITION
 from app.websocket.manager import manager
 
 _train_state: dict[int, dict] = {}
+
+def _invalidate_train_position_cache() -> None:
+    """Drop every cached `train:positions:*` view this tick's position
+    writes can affect.
+
+    BUGFIX (Phase 29A - stale REST reads after a live tick): this is
+    the same helper app/services/train_service.py already defines and
+    calls from create_train()/update_train() - duplicated here rather
+    than imported, because train_service.py imports
+    app.simulator.train_simulator (for get_direction), so importing
+    train_service from here would be a circular import.
+
+    Before this fix, every tick in track_tick() below wrote fresh
+    positions straight to Postgres and correctly broadcast them over
+    the WebSocket, but never touched the Redis cache backing
+    GET /trains/live (train_service.list_live_positions). Any client
+    that reacted to the train_position push by refetching over REST
+    kept getting the previous tick's positions until the cache's TTL
+    happened to expire on its own.
+    """
+    cache.delete("train:positions:all")
+    for state in STATE_CITY_MAP:
+        cache.delete(f"train:positions:{state}")
 
 def get_direction(train_id: int) -> int:
     return _train_state.get(train_id, {}).get("direction", 1)
@@ -133,13 +158,16 @@ def _track_tick_sync(db: Session, tick_seconds: int) -> list[dict]:
 
     if updates:
         db.commit()
+        _invalidate_train_position_cache()
 
     return updates
 
 async def track_tick(db: Session, interval_seconds: int) -> list[dict]:
     updates = await asyncio.to_thread(_track_tick_sync, db, interval_seconds)
     if updates:
-        await manager.broadcast(
+        # Phase 4: broadcast_everywhere() - see csv_replay_simulator.py's
+        # replay_tick() for why (same reasoning applies to this loop).
+        await manager.broadcast_everywhere(
             TRAIN_POSITION,
             {"updates": updates, "timestamp": datetime.utcnow().isoformat()},
         )
@@ -152,6 +180,9 @@ async def run_forever(session_factory, interval_seconds: int = 5) -> None:
             await track_tick(db, interval_seconds)
         except Exception as exc:                
             print(f"[train_simulator] tick failed, will retry next interval: {exc}")
+            # Phase 6: explicit rollback before close - see
+            # csv_replay_simulator.py's run_forever for why.
+            db.rollback()
         finally:
             db.close()
         await asyncio.sleep(interval_seconds)

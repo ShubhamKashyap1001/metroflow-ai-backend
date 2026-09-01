@@ -1,10 +1,11 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 
 from app.core import cache, log_buffer
 from app.core.config import settings
+from app.core.rate_limit import ADMIN_LIMIT, limiter
 from app.core.security import require_roles
 from app.database.database import engine
 from app.database.session import SessionLocal
@@ -36,28 +37,36 @@ async def simulator_status(
     }
 
 @router.post("/simulator/start")
+@limiter.limit(ADMIN_LIMIT)
 async def simulator_start(
+    request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     start_simulator(SessionLocal, settings.SIMULATOR_INTERVAL_SECONDS)
     return {"crowd_simulator_running": is_simulator_running()}
 
 @router.post("/simulator/stop")
+@limiter.limit(ADMIN_LIMIT)
 async def simulator_stop(
+    request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     await stop_simulator()
     return {"crowd_simulator_running": is_simulator_running()}
 
 @router.post("/train-tracker/start")
+@limiter.limit(ADMIN_LIMIT)
 async def train_tracker_start(
+    request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     start_train_tracker(SessionLocal, settings.TRAIN_TRACK_INTERVAL_SECONDS)
     return {"train_tracker_running": is_train_tracker_running()}
 
 @router.post("/train-tracker/stop")
+@limiter.limit(ADMIN_LIMIT)
 async def train_tracker_stop(
+    request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     await stop_train_tracker()

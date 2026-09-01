@@ -23,6 +23,7 @@ data, never invented:
 """
 import logging
 import os
+import time as _time
 from datetime import date, datetime
 from functools import lru_cache
 
@@ -31,6 +32,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.ai_engine.prediction.crowd_predictor import predict_crowd
+from app.core import cache
 from app.models.train import Train
 
 logger = logging.getLogger(__name__)
@@ -49,27 +51,115 @@ def _load_model():
         print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")
         return None
 
+# BUGFIX (remaining N+1 query): predict_delay(db, ..., train_id=None) -
+# the path every call in prediction_service.smart_recommendations_bulk
+# takes, since that loop never has a specific train in mind, just a
+# station - used to run TWO separate `SELECT ... FROM trains WHERE
+# is_active` scans on EVERY call (one in _real_capacity_passengers, one
+# in _real_train_age_days), each recomputing the exact same fleet-wide
+# average from scratch. smart_recommendations_bulk calls this once per
+# station in its loop (up to MAX_BULK_RECOMMENDATION_STATIONS=30), so
+# a single dashboard refresh - or the live WebSocket-triggered refresh
+# firing roughly every SIMULATOR_INTERVAL_SECONDS - could issue up to
+# 60 redundant full-table scans of `trains` computing the IDENTICAL
+# two numbers over and over, once per station, instead of once per
+# request.
+#
+# Fixed the same way train_tracking.py's route cache already fixes the
+# identical class of problem for schedules: a single combined query
+# (one SELECT for both columns instead of two) whose result - the
+# fleet-wide (avg_capacity, avg_age_days) pair - is cached for
+# FLEET_STATS_CACHE_TTL_SECONDS (Redis-backed, with a short process-
+# local fallback so a cache-miss burst within the same process doesn't
+# all fall through to Postgres at once). This data only changes when a
+# train is added/retired or ages by a day, so a short TTL costs
+# nothing in freshness while collapsing N per-station queries into at
+# most one per cache window.
+FLEET_STATS_CACHE_TTL_SECONDS = 300
+_FLEET_STATS_CACHE_KEY = "predict:delay:fleet-stats"
+_fleet_stats_local: tuple[float, float] | None = None
+_fleet_stats_local_at: float = 0.0
+
+def _compute_fleet_stats(db: Session) -> tuple[float, float]:
+    """Single query for both capacity and commissioned_date across
+    every active train (was two separate `.all()` queries before this
+    fix), returning (avg_capacity, avg_age_days). Falls back to the
+    same defaults the old per-metric functions used if there's no
+    active-train data at all."""
+    rows = (
+        db.query(Train.capacity, Train.commissioned_date)
+        .filter(Train.is_active.is_(True))
+        .all()
+    )
+    if not rows:
+        return 1200.0, 0.0
+
+    capacities = [c for c, _ in rows if c is not None]
+    avg_capacity = sum(capacities) / len(capacities) if capacities else 1200.0
+
+    today = date.today()
+    ages = [(today - commissioned).days for _, commissioned in rows if commissioned is not None]
+    avg_age_days = sum(ages) / len(ages) if ages else 0.0
+
+    return avg_capacity, avg_age_days
+
+def _fleet_stats(db: Session) -> tuple[float, float]:
+    global _fleet_stats_local, _fleet_stats_local_at
+
+    if _fleet_stats_local is not None and (_time.monotonic() - _fleet_stats_local_at) < FLEET_STATS_CACHE_TTL_SECONDS:
+        return _fleet_stats_local
+
+    cached = cache.get_json(_FLEET_STATS_CACHE_KEY)
+    if cached is not None:
+        stats = (cached["avg_capacity"], cached["avg_age_days"])
+        _fleet_stats_local = stats
+        _fleet_stats_local_at = _time.monotonic()
+        return stats
+
+    stats = _compute_fleet_stats(db)
+    _fleet_stats_local = stats
+    _fleet_stats_local_at = _time.monotonic()
+    cache.set_json(
+        _FLEET_STATS_CACHE_KEY,
+        {"avg_capacity": stats[0], "avg_age_days": stats[1]},
+        ttl_seconds=FLEET_STATS_CACHE_TTL_SECONDS,
+    )
+    return stats
+
+def invalidate_fleet_stats_cache() -> None:
+    """Drop the cached fleet-wide (avg_capacity, avg_age_days) pair.
+
+    Called after a train is created/updated (see
+    train_service.create_train/update_train) so a capacity/
+    commissioned_date change - or a brand new train - is reflected in
+    the next delay prediction that falls back to the fleet average,
+    instead of waiting out the rest of FLEET_STATS_CACHE_TTL_SECONDS.
+    Same "clear both layers" shape as train_tracking.py's
+    invalidate_route_cache()."""
+    global _fleet_stats_local, _fleet_stats_local_at
+    cache.delete(_FLEET_STATS_CACHE_KEY)
+    _fleet_stats_local = None
+    _fleet_stats_local_at = 0.0
+
 def _real_capacity_passengers(db: Session | None, train_id: int | None) -> float:
     """Real Train.capacity - this train's own if we know which train,
-    otherwise the real average across active trains. Never a made-up
-    constant."""
+    otherwise the real average across active trains (cached - see
+    _fleet_stats above). Never a made-up constant."""
     if db is None:
         return 1200.0                                                  
     if train_id is not None:
         train = db.get(Train, train_id)
         if train is not None:
             return float(train.capacity)
-    rows = db.query(Train.capacity).filter(Train.is_active.is_(True)).all()
-    if rows:
-        values = [c for (c,) in rows]
-        return sum(values) / len(values)
-    return 1200.0
+    avg_capacity, _ = _fleet_stats(db)
+    return avg_capacity
 
 def _real_train_age_days(db: Session | None, train_id: int | None) -> float:
     """Real (today - Train.commissioned_date).days for this train, or
-    the real average age across active trains if no specific train_id
-    is given. 0.0 only if there's genuinely no commissioned_date data
-    at all (e.g. an older synthetic seed)."""
+    the real average age across active trains (cached - see
+    _fleet_stats above) if no specific train_id is given. 0.0 only if
+    there's genuinely no commissioned_date data at all (e.g. an older
+    synthetic seed)."""
     if db is None:
         return 0.0
 
@@ -78,15 +168,8 @@ def _real_train_age_days(db: Session | None, train_id: int | None) -> float:
         if train is not None and train.commissioned_date is not None:
             return float((date.today() - train.commissioned_date).days)
 
-    rows = (
-        db.query(Train.commissioned_date)
-        .filter(Train.is_active.is_(True), Train.commissioned_date.isnot(None))
-        .all()
-    )
-    if rows:
-        ages = [(date.today() - c).days for (c,) in rows]
-        return sum(ages) / len(ages)
-    return 0.0
+    _, avg_age_days = _fleet_stats(db)
+    return avg_age_days
 
 def predict_delay(
     station_id: int,
@@ -132,6 +215,13 @@ def predict_delay(
                 "capacity_passengers": _real_capacity_passengers(db, train_id),
                 "train_age_days": train_age_days,
                 "train_age_years": train_age_days / 365.25,
+                # No live weather feed wired up yet, so this defaults to
+                # 0 ("Sunny" in the training encoding - Sunny/Overcast/
+                # Rainy/Stormy = 0/1/2/3), the single most common
+                # category in the training data (~56% of rows). Once a
+                # real weather API/DB column is wired up at inference
+                # time, replace this constant with that live value.
+                "weather_code": 0,
             }
                                                                        
             features = pd.DataFrame(

@@ -1,6 +1,6 @@
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -13,8 +13,35 @@ from app.models.station import Station
 from app.models.train_schedule import TrainSchedule
 from app.utils.geo import cities_for_state
 
+# Phase 9: prediction_insights already took a `limit` query param, but
+# never clamped it - a caller passing ?limit=5000000 (or omitting a
+# sane default of their own) could still pull the entire predictions
+# history table (every crowd/demand/delay/frequency prediction ever
+# made) into one response. Same cap pattern as
+# app/api/v1/admin.py::get_logs (`min(max(limit, 1), 500)`).
+MAX_PREDICTION_INSIGHTS_LIMIT = 200
+
+# BUGFIX (remaining expensive history queries): traffic_analysis_report
+# and passenger_flow_overview both take a caller-supplied `hours`
+# window with no upper bound, then run `since = now - timedelta(hours=
+# hours)` straight into a crowd_logs query. An oversized value (e.g.
+# ?hours=87600000) degrades into scanning/aggregating the ENTIRE
+# ever-growing crowd_logs table - passenger_flow_overview is the worse
+# of the two, since it pulls raw per-row CrowdLog data with `.all()`
+# (no limit at all) rather than aggregating in SQL. Same class of
+# problem Phase 9 already fixed for prediction_insights above, just
+# reached via a time filter instead of a raw limit. The frontend never
+# asks for more than 72h (see ReportsPanel.tsx's WINDOW_OPTIONS), so
+# this cap is far above any real usage and purely a server-side
+# backstop.
+MAX_HISTORY_WINDOW_HOURS = 720  # 30 days
+
+def _clamp_hours(hours: float) -> float:
+    return min(max(hours or 1, 1), MAX_HISTORY_WINDOW_HOURS)
+
 def traffic_analysis_report(db: Session, hours: int = 24, state: str | None = None) -> dict:
-    since = datetime.utcnow() - timedelta(hours=hours)
+    hours = _clamp_hours(hours)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     cities = cities_for_state(state)
 
     per_station_query = (
@@ -59,10 +86,11 @@ def traffic_analysis_report(db: Session, hours: int = 24, state: str | None = No
         "stations": sorted(report_rows, key=lambda r: r["peak_count"], reverse=True),
         "busiest_station": busiest,
         "currently_delayed_schedules": total_delayed,
-        "generated_at": datetime.utcnow(),
+        "generated_at": datetime.now(timezone.utc),
     }
 
 def prediction_insights(db: Session, limit: int = 20, state: str | None = None) -> list[Prediction]:
+    limit = min(max(limit or 20, 1), MAX_PREDICTION_INSIGHTS_LIMIT)
     query = db.query(Prediction)
     cities = cities_for_state(state)
     if cities:
@@ -107,7 +135,7 @@ def _empty_passenger_flow_overview(hours: float) -> dict:
         "avg_predicted_occupancy": 0.0,
         "top_stations": [],
         "ridership_by_line": [],
-        "generated_at": datetime.utcnow(),
+        "generated_at": datetime.now(timezone.utc),
     }
 
 def passenger_flow_overview(
@@ -116,8 +144,25 @@ def passenger_flow_overview(
     state: str | None = None,
     top_n: int = 8,
 ) -> dict:
-    
-    since = datetime.utcnow() - timedelta(hours=hours)
+    """Powers the "Passenger Flow by Station" chart, the four KPI cards,
+    and the "Ridership by Line" donut on the Analytics page.
+
+    Entries/exits are derived the same way crowd_service.get_inflow_outflow
+    already derives them for a single station - consecutive CrowdLog
+    samples rising = passengers entering, falling = passengers exiting -
+    just run for every station in `state` at once instead of one at a
+    time, and summed/grouped for the KPI totals, per-station chart rows,
+    and per-line ridership breakdown.
+
+    `hours` is deliberately a short rolling window by default at the call
+    site (0.5 = last 30 minutes), not a 24h cumulative one: with a 24h
+    cumulative denominator, one more 5-second simulator tick barely moves
+    the total at all, so the KPI cards and chart looked frozen even
+    though fresh data was arriving continuously. A short window makes
+    each new sample a visible fraction of the total instead.
+    """
+    hours = _clamp_hours(hours)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     cities = cities_for_state(state)
 
     station_query = db.query(Station.id, Station.station_name, Station.capacity).filter(
@@ -205,5 +250,5 @@ def passenger_flow_overview(
         "avg_predicted_occupancy": avg_predicted_occupancy,
         "top_stations": top_stations,
         "ridership_by_line": ridership_by_line,
-        "generated_at": datetime.utcnow(),
+        "generated_at": datetime.now(timezone.utc),
     }

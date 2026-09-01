@@ -49,32 +49,37 @@ TRAINS_CSV = os.path.join(DATASET_DIR, "trains.csv.gz")
 # columns, get swallowed by the try/except in compute_delay_metrics(), and
 # fall back to "no trained model" even though delay_model.pkl loads fine).
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
-            "passenger_count", "capacity_passengers", "train_age_days"]
+            "passenger_count", "capacity_passengers", "train_age_days", "weather_code"]
 TARGET = "delay_minutes"
 
 DISPLAY_NAMES = {"random_forest": "Random Forest", "xgboost": "XGBoost"}
 
-def _norm_key(city: str, name: str) -> tuple[str, str]:
-    return city.strip().lower(), name.strip().lower()
+WEATHER_CODE = {"Sunny": 0, "Overcast": 1, "Rainy": 2, "Stormy": 3}
 
-def _station_id_map() -> dict:
+def _station_id_map() -> dict[str, int]:
     """Same cleaning/ordering as colab_training/_real_dataset_builder.py
-    ::_station_id_map and crowd_metrics.py::_station_id_map, kept in
-    sync manually so training and evaluation never drift apart."""
-    stations = pd.read_csv(STATIONS_CSV).rename(
-        columns={"City": "city", "Station": "station_name", "Line": "line",
-                 "Latitude": "latitude", "Longitude": "longitude"}
-    )
-    for col in ["city", "station_name", "line"]:
+    ::_station_id_map and app/database/seed_real_data.py (which assigns
+    the real DB station.id the exact same way), kept in sync manually
+    so training and evaluation never drift apart.
+
+    Bug fix: this used to ignore the dataset's own `station_id` column
+    and invent a fresh 1..N numbering by sorting stations by (city,
+    line, station_name), joining passenger_flow/train_operations back
+    on a (city, station_name) key. That numbering never matched the
+    row-order numbering the training builder/seeder actually assign, so
+    every evaluation row got a scrambled station_id relative to what
+    the model was trained on - see crowd_metrics.py for the full
+    writeup of the same bug there. Mapping the native station_id string
+    directly fixes it here too.
+    """
+    stations = pd.read_csv(STATIONS_CSV)
+    for col in ["station_id", "city", "line", "station_name"]:
         stations[col] = stations[col].astype(str).str.strip()
-    stations = stations.drop_duplicates(subset=["city", "station_name"])
-    stations = stations.dropna(subset=["city", "station_name", "line", "latitude", "longitude"])
-    stations = stations.sort_values(["city", "line", "station_name"]).reset_index(drop=True)
-    stations["station_id"] = stations.index + 1
-    return dict(zip(
-        stations.apply(lambda r: _norm_key(r["city"], r["station_name"]), axis=1),
-        stations["station_id"],
-    ))
+    stations = stations.drop_duplicates(subset=["station_id"]).dropna(
+        subset=["station_id", "city", "line", "station_name", "latitude", "longitude"]
+    ).reset_index(drop=True)
+    stations["int_station_id"] = stations.index + 1
+    return dict(zip(stations["station_id"], stations["int_station_id"]))
 
 def _train_info_map() -> pd.DataFrame:
     """Real per-train capacity_passengers/train_age_days - mirrors
@@ -95,10 +100,7 @@ def _crowd_table(station_id_map: dict) -> pd.DataFrame:
     delay model was trained with passenger_count as a feature, so the
     training table needs it too."""
     df = pd.read_csv(PASSENGER_FLOW_CSV)
-    df["city"] = df["city"].astype(str).str.strip()
-    df["station_name"] = df["station_name"].astype(str).str.strip()
-    df["_key"] = df.apply(lambda r: _norm_key(r["city"], r["station_name"]), axis=1)
-    df["station_id"] = df["_key"].map(station_id_map)
+    df["station_id"] = df["station_id"].astype(str).str.strip().map(station_id_map)
     df = df.dropna(subset=["station_id"])
     df["station_id"] = df["station_id"].astype(int)
 
@@ -120,10 +122,7 @@ def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame
     function did) would lose exactly the signal those 2 features exist to
     capture. Mirrors colab_training/_real_dataset_builder.py::build_delay_dataset."""
     df = pd.read_csv(TRAIN_OPERATIONS_CSV)
-    df["city"] = df["city"].astype(str).str.strip()
-    df["station_name"] = df["station_name"].astype(str).str.strip()
-    df["_key"] = df.apply(lambda r: _norm_key(r["city"], r["station_name"]), axis=1)
-    df["station_id"] = df["_key"].map(station_id_map)
+    df["station_id"] = df["station_id"].astype(str).str.strip().map(station_id_map)
     df = df.dropna(subset=["station_id"])
     df["station_id"] = df["station_id"].astype(int)
 
@@ -135,6 +134,14 @@ def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
     df["is_peak_hour"] = ((df["hour"].between(8, 11)) | (df["hour"].between(17, 20))).astype(int)
     df["delay_minutes"] = df["delay_arrival_min"].fillna(0).clip(lower=0)
+    # Bug fix: the shipped delay_model.pkl was trained with a 9th
+    # feature, weather_code (see colab_training/_real_dataset_builder.py
+    # ::build_delay_dataset and delay_predictor.py), but this table
+    # never built that column - X_test[model_features] below raised a
+    # KeyError on every request, which the try/except in
+    # compute_delay_metrics() swallowed into a permanent "no trained
+    # model" empty state for the whole delay dashboard card.
+    df["weather_code"] = df["weather"].map(WEATHER_CODE).fillna(0).astype(int)
 
     df = df.merge(train_info, on="train_id", how="left")
     before = len(df)
@@ -144,7 +151,7 @@ def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame
         print(f"[{__name__}] delay metrics: dropped {dropped} row(s) with unknown train_id")
 
     return df[["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
-               "delay_minutes", "capacity_passengers", "train_age_days"]]
+               "delay_minutes", "capacity_passengers", "train_age_days", "weather_code"]]
 
 def _load_model():
     if not os.path.exists(MODEL_PATH):

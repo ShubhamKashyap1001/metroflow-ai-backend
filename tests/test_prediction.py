@@ -65,3 +65,22 @@ def test_traffic_pattern_aggregate_requires_auth(client):
 def test_smart_recommendations_requires_auth(client):
     response = client.get(f"/api/v1/predictions/recommendations/{NON_EXISTENT_ID}")
     assert response.status_code in (401, 403)
+
+
+# --- Phase 1 (P0-1) additions: bulk recommendations endpoint ---------------
+
+def test_recommendations_bulk_requires_auth(client):
+    """Same auth requirement as the single-station endpoint."""
+    response = client.get("/api/v1/predictions/recommendations/bulk?station_ids=1,2,3")
+    assert response.status_code in (401, 403)
+
+
+def test_recommendations_bulk_route_not_shadowed_by_station_id_route(client):
+    """`/recommendations/bulk` must be matched by the bulk route, not by
+    `/recommendations/{station_id}` trying (and failing) to parse
+    "bulk" as an int. If the routes were registered in the wrong order,
+    this would 422 on path-param validation instead of the expected
+    401/403 from the auth dependency - this test pins the registration
+    order added in Phase 1."""
+    response = client.get("/api/v1/predictions/recommendations/bulk?station_ids=1")
+    assert response.status_code in (401, 403)

@@ -1,6 +1,12 @@
-from fastapi import APIRouter, Depends
+"""Milestone 1 - Crowd Monitoring Module.
+
+Fixed: previously imported a non-existent `database.supabase` client and
+had no request validation. Now backed by SQLAlchemy + crowd_service.
+"""
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import WRITE_LIMIT, limiter
 from app.database.session import get_db
 from app.enums.crowd_level import CrowdLevel
 from app.schemas.crowd_log import CrowdLogCreate, CrowdLogResponse
@@ -12,7 +18,8 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=CrowdLogResponse, status_code=201)
-def log_crowd(payload: CrowdLogCreate, db: Session = Depends(get_db)):
+@limiter.limit(WRITE_LIMIT)
+def log_crowd(request: Request, payload: CrowdLogCreate, db: Session = Depends(get_db)):
     """Ingest a passenger density reading for a station (ticketing / sensor feed)."""
     return crowd_service.log_crowd_count(db, payload)
 

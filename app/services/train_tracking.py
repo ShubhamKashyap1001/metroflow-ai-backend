@@ -110,6 +110,36 @@ def _delay_by_station_for(db: Session, train_ids: list[int]) -> dict[int, dict[i
         delay_by_station.setdefault(train_id, {})[station_id] = delay_minutes or 0
     return delay_by_station
 
+def invalidate_route_cache() -> None:
+    """Drop the route/segment-duration cache after a schedule row is
+    created or edited (arrival_time, station_sequence, or a brand new
+    stop for a train all change the shape of build_routes()' output).
+
+    BUGFIX (stale cached data): this cache was previously invalidated
+    by NOTHING - only TTL expiry (_ROUTE_CACHE_TTL_SECONDS = 300s) or a
+    train_id that had never been seen before ever forced a rebuild.
+    Editing an existing schedule row's arrival_time (retiming a stop,
+    which changes every adjacent segment_seconds gap) or adding a new
+    stop to a train that already has a cached route left the Live
+    Train Map's ETAs and /trains/routes computed off the pre-edit
+    route/segment data for up to 5 minutes after the write committed -
+    a real, user-visible staleness window, not just the deliberately
+    "never cached" delay_minutes this module's own docstring already
+    calls out.
+
+    Clears BOTH layers: the Redis-backed key (so any process that
+    currently has this train_id cached, or that reads via
+    _load_from_redis before its own TTL check, doesn't hydrate a stale
+    snapshot) and this process's local dict/timestamp (so the very
+    same request path that just wrote the schedule sees the resulting
+    route on its next read, instead of waiting out this process's own
+    remaining TTL window)."""
+    global _routes_cache, _segment_seconds_cache, _routes_cache_at
+    cache.delete(_ROUTE_CACHE_KEY)
+    _routes_cache = {}
+    _segment_seconds_cache = {}
+    _routes_cache_at = 0.0
+
 def build_routes(
     db: Session, train_ids: list[int]
 ) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, dict[int, int]]]:

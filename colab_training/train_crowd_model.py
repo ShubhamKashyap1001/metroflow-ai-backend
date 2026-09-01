@@ -21,7 +21,7 @@ import os
 
 import joblib
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
 from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
 
@@ -49,14 +49,35 @@ def train() -> dict:
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+    # Bug fix (Passenger Analytics widget showing ~0 for every city except
+    # Delhi/Kolkata): `passenger_count` spans wildly different scales across
+    # cities (Delhi averages ~5700/hour, Pune/Bhopal average ~20-40/hour -
+    # see docs/passenger-analytics-model-selection.md). Selecting the "best" model by raw MAE lets
+    # a model that's good at Delhi's huge numbers win the comparison purely
+    # by dominating the absolute-error sum, even if it's systematically
+    # wrong (including negative, clamped to 0) for every smaller city -
+    # those cities' errors are individually tiny in absolute terms, so they
+    # barely move the MAE needle regardless of how wrong they are
+    # proportionally. That's exactly the failure mode that made
+    # `all_stations_traffic_pattern()` sum to ~0 for every city except the
+    # one or two with the largest ridership.
+    #
+    # MAPE (mean absolute PERCENTAGE error) instead weighs every station
+    # roughly equally in relative terms, so a model has to actually predict
+    # each city's own scale reasonably well to win - not just nail
+    # whichever city happens to have the biggest numbers.
     results = {}
     for name, build in CANDIDATES.items():
         model = build()
         model.fit(X_train, y_train)
         predictions = model.predict(X_test)
-        results[name] = {"model": model, "mae": mean_absolute_error(y_test, predictions)}
+        results[name] = {
+            "model": model,
+            "mae": mean_absolute_error(y_test, predictions),
+            "mape": mean_absolute_percentage_error(y_test, predictions),
+        }
 
-    best_name = min(results, key=lambda n: results[n]["mae"])
+    best_name = min(results, key=lambda n: results[n]["mape"])
     best_model = results[best_name]["model"]
     best_mae = results[best_name]["mae"]
 
@@ -74,10 +95,14 @@ def train() -> dict:
         "samples": len(df),
         "model_name": best_name,
         "candidate_mae": {name: r["mae"] for name, r in results.items()},
+        "candidate_mape": {name: r["mape"] for name, r in results.items()},
     }
 
 if __name__ == "__main__":
     metrics = train()
-    comparison = ", ".join(f"{name}={mae:.2f}" for name, mae in metrics["candidate_mae"].items())
+    comparison = ", ".join(
+        f"{name}=MAE:{mae:.2f}/MAPE:{metrics['candidate_mape'][name]:.1%}"
+        for name, mae in metrics["candidate_mae"].items()
+    )
     print(f"Crowd model trained. Selected={metrics['model_name']} (MAE={metrics['mae']:.2f} passengers) "
           f"[{comparison}], saved to {metrics['model_path']}")

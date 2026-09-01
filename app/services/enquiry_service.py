@@ -13,16 +13,37 @@ from app.models.user_profile import UserProfile
 from app.schemas.enquiry import EnquiryCreate, EnquiryResolve
 from app.services import notification_service
 
+# BUGFIX (expensive analytics/user/enquiry queries): list_enquiries ran
+# `.all()` with no limit/offset - the admin "manage enquiries" queue
+# (no filter, every enquiry ever raised) and the passenger's "My
+# Enquiries" list both pulled every matching row into memory and
+# serialized it as one JSON response, growing unbounded over time. Same
+# DEFAULT_*_LIMIT/MAX_*_LIMIT + hard-clamped offset/limit shape already
+# used for alerts/notifications/predictions (Phase 9), schedules
+# (schedule_service.py), and users (app/api/v1/users.py).
+DEFAULT_ENQUIRIES_LIMIT = 100
+MAX_ENQUIRIES_LIMIT = 500
+
+def _clamp(value: int | None, default: int, maximum: int) -> int:
+    if value is None:
+        value = default
+    return min(max(value, 1), maximum)
+
 def list_enquiries(
     db: Session,
     current_user: UserProfile,
     status: EnquiryStatus | None = None,
+    limit: int = DEFAULT_ENQUIRIES_LIMIT,
+    offset: int = 0,
 ) -> list[Enquiry]:
     """Admins/operators see every enquiry (the "manage enquiries"
     queue). Passengers only ever see their own - this is what powers
     the passenger's "My Enquiries" list, and also guards
     get_enquiry() below against a passenger guessing another user's
     enquiry id."""
+    limit = _clamp(limit, DEFAULT_ENQUIRIES_LIMIT, MAX_ENQUIRIES_LIMIT)
+    offset = max(offset or 0, 0)
+
     query = db.query(Enquiry).options(joinedload(Enquiry.user))
 
     if current_user.role not in (UserRole.ADMIN, UserRole.OPERATOR):
@@ -31,7 +52,7 @@ def list_enquiries(
     if status:
         query = query.filter(Enquiry.status == status)
 
-    return query.order_by(Enquiry.created_at.desc()).all()
+    return query.order_by(Enquiry.created_at.desc()).offset(offset).limit(limit).all()
 
 def create_enquiry(db: Session, payload: EnquiryCreate, user_id) -> Enquiry:
     enquiry = Enquiry(**payload.model_dump(), user_id=user_id)

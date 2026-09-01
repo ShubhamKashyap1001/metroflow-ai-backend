@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Depends
+"""Passenger entry (check-in) - source of the "Passenger Entry & Exit
+Records" dataset, and drives live crowd counts."""
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import WRITE_LIMIT, limiter
 from app.core.security import get_current_user
 from app.database.session import get_db
 from app.models.user_profile import UserProfile
@@ -13,7 +16,9 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=JourneyResponse, status_code=201)
+@limiter.limit(WRITE_LIMIT)
 def check_in(
+    request: Request,
     payload: CheckInRequest,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),

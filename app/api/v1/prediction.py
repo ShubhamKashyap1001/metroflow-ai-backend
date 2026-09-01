@@ -1,9 +1,15 @@
+"""Milestone 2 - AI Prediction Module API.
 
-from fastapi import APIRouter, Depends, Request
-from slowapi import Limiter
-from slowapi.util import get_ipaddr
+Crowd prediction models, passenger demand forecasting, traffic
+pattern analysis, smart recommendations. Every route requires a
+logged-in user and is rate-limited (20/minute per IP) since these all
+run an ML model - unauthenticated/unlimited access to compute-heavy
+endpoints is an easy way to overload the server.
+"""
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import limiter
 from app.core.security import get_current_user
 from app.database.session import get_db
 from app.models.user_profile import UserProfile
@@ -24,8 +30,6 @@ router = APIRouter(
     prefix="/predictions",
     tags=["AI Prediction"]
 )
-
-limiter = Limiter(key_func=get_ipaddr)
 
 @router.post("/crowd", response_model=PredictionResponse)
 @limiter.limit("20/minute")
@@ -58,7 +62,11 @@ def forecast_demand(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    """Passenger demand forecasting, hour-by-hour."""
+    """Passenger demand forecasting, hour-by-hour. `hours_ahead` is
+    clamped server-side to a sane range - see
+    prediction_service.MAX_DEMAND_FORECAST_HOURS_AHEAD - so an
+    oversized value can't turn one request into an unbounded amount of
+    model inference / DB writes / response rows."""
     return prediction_service.forecast_demand(db, payload.station_id, payload.hours_ahead)
 
 @router.post("/delay", response_model=PredictionResponse)
@@ -132,6 +140,45 @@ def traffic_pattern_aggregate(
     fan out one request per station (see prediction_service.
     all_stations_traffic_pattern for why that used to fail)."""
     return prediction_service.all_stations_traffic_pattern(db, state)
+
+MAX_BULK_RECOMMENDATION_STATIONS = 30
+
+@router.get("/recommendations/bulk", response_model=dict[int, list[SmartRecommendation]])
+@limiter.limit("20/minute")
+def recommendations_bulk(
+    request: Request,
+    station_ids: str,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+):
+    """Smart recommendations for MANY stations in a single rate-limited
+    call - `station_ids` is a comma-separated list, e.g.
+    `?station_ids=1,2,3`. Registered ABOVE `/recommendations/{station_id}`
+    so `bulk` is never swallowed by that route's int path param.
+
+    This is the Phase 1 (P0-1) fix for the AI Insights panel, which
+    previously called `/recommendations/{station_id}` once per ranked
+    station (up to 15 in parallel) on every dashboard load and on every
+    live socket event - see prediction_service.smart_recommendations_bulk
+    for the full explanation. `MAX_BULK_RECOMMENDATION_STATIONS` caps
+    the list length so this single call can't itself become a way to
+    request unbounded work in one rate-limited request.
+    """
+    try:
+        ids = [int(s) for s in station_ids.split(",") if s.strip() != ""]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="station_ids must be a comma-separated list of integers")
+
+    if not ids:
+        return {}
+
+    if len(ids) > MAX_BULK_RECOMMENDATION_STATIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"station_ids supports at most {MAX_BULK_RECOMMENDATION_STATIONS} stations per call",
+        )
+
+    return prediction_service.smart_recommendations_bulk(db, ids)
 
 @router.get("/recommendations/{station_id}", response_model=list[SmartRecommendation])
 @limiter.limit("20/minute")

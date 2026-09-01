@@ -69,27 +69,33 @@ def _bucket(ratio: float) -> str:
         return "high"
     return "critical"
 
-def _norm_key(city: str, name: str) -> tuple[str, str]:
-    return city.strip().lower(), name.strip().lower()
-
-def _station_id_map() -> dict:
+def _station_id_map() -> dict[str, int]:
     """Same cleaning/ordering as colab_training/_real_dataset_builder.py
-    ::_station_id_map, kept in sync manually so training and evaluation
-    never drift apart."""
-    stations = pd.read_csv(STATIONS_CSV).rename(
-        columns={"City": "city", "Station": "station_name", "Line": "line",
-                 "Latitude": "latitude", "Longitude": "longitude"}
-    )
-    for col in ["city", "station_name", "line"]:
+    ::_station_id_map (and app/database/seed_real_data.py, which assigns
+    the real DB station.id the exact same way) - kept in sync manually
+    so training and evaluation never drift apart.
+
+    Bug fix: this used to ignore the dataset's own `station_id` column
+    (e.g. "STN-DEL-YL-01") entirely and invent a fresh 1..N numbering by
+    sorting stations by (city, line, station_name), then join
+    passenger_flow.csv back on a (city, station_name) key. That
+    numbering never matched the row-order numbering
+    _real_dataset_builder.py/seed_real_data.py actually assign (no
+    sort, drop_duplicates on the native station_id string, index+1) -
+    so every evaluation row got a scrambled station_id relative to what
+    the model was trained on, which is what made a genuinely reasonable
+    model (~470 MAE / ~48% MAPE at training time) score as R2=-0.63 /
+    MAPE=1243% here. Mapping the native station_id string directly -
+    exactly like the two files above - fixes that drift.
+    """
+    stations = pd.read_csv(STATIONS_CSV)
+    for col in ["station_id", "city", "line", "station_name"]:
         stations[col] = stations[col].astype(str).str.strip()
-    stations = stations.drop_duplicates(subset=["city", "station_name"])
-    stations = stations.dropna(subset=["city", "station_name", "line", "latitude", "longitude"])
-    stations = stations.sort_values(["city", "line", "station_name"]).reset_index(drop=True)
-    stations["station_id"] = stations.index + 1
-    return dict(zip(
-        stations.apply(lambda r: _norm_key(r["city"], r["station_name"]), axis=1),
-        stations["station_id"],
-    ))
+    stations = stations.drop_duplicates(subset=["station_id"]).dropna(
+        subset=["station_id", "city", "line", "station_name", "latitude", "longitude"]
+    ).reset_index(drop=True)
+    stations["int_station_id"] = stations.index + 1
+    return dict(zip(stations["station_id"], stations["int_station_id"]))
 
 def _load_model():
     if not os.path.exists(MODEL_PATH):
@@ -193,10 +199,7 @@ def compute_crowd_metrics() -> dict:
         station_id_map = _station_id_map()
 
         raw = pd.read_csv(PASSENGER_FLOW_CSV)
-        raw["city"] = raw["city"].astype(str).str.strip()
-        raw["station_name"] = raw["station_name"].astype(str).str.strip()
-        raw["_key"] = raw.apply(lambda r: _norm_key(r["city"], r["station_name"]), axis=1)
-        raw["station_id"] = raw["_key"].map(station_id_map)
+        raw["station_id"] = raw["station_id"].astype(str).str.strip().map(station_id_map)
         raw = raw.dropna(subset=["station_id"])
         raw["station_id"] = raw["station_id"].astype(int)
         raw["entries"] = raw["entries"].clip(lower=0)

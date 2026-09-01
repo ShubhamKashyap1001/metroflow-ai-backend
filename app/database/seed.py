@@ -1,4 +1,14 @@
+"""Seeds a demo metro network: one line, six stations, three trains,
+a day's worth of train schedules (with peak-hour flags), and an
+initial crowd reading per station.
 
+Does NOT create any user/login - Supabase owns sign-up now. After
+seeding, sign up through the frontend (or Supabase dashboard), then
+run `python -m app.database.set_user_role <email> admin` to promote
+your account.
+
+Run directly:  python -m app.database.seed
+"""
 from datetime import time
 
 from app.database.init_db import create_tables

@@ -1,4 +1,20 @@
+"""One-off migration for the new Notification.state column.
 
+This project doesn't use Alembic - app/database/init_db.py just calls
+Base.metadata.create_all(), which only creates tables that don't exist
+yet and never alters an existing one. If your `notifications` table
+already exists (i.e. you ran init_db.py before this update), run this
+once to add the new column without losing existing data:
+
+    cd backend
+    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
+    python -m app.database.migrate_notification_state
+
+Safe to run more than once - the statement is IF NOT EXISTS. Existing
+rows get state = NULL, which means "not tied to any one state" - they
+keep showing up for every user regardless of their selected state
+filter, same as before this migration.
+"""
 from sqlalchemy import text
 
 from app.core.config import settings
