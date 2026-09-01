@@ -1,6 +1,13 @@
-from fastapi import APIRouter, Depends
+"""News & Announcements module. Admins/operators publish "latest
+news" items (service updates, general announcements); every
+authenticated user (passenger included) reads the published feed.
+Separate from the Alert module (station-scoped, email/SMS-dispatched
+incident alerts) - this is lightweight, unscoped announcements.
+"""
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import WRITE_LIMIT, limiter
 from app.core.security import get_current_user, require_roles
 from app.database.session import get_db
 from app.enums.user_role import UserRole
@@ -16,15 +23,22 @@ router = APIRouter(
 @router.get("/", response_model=list[NewsResponse])
 def get_news_feed(
     include_inactive: bool = False,
+    limit: int = news_service.DEFAULT_NEWS_LIMIT,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
+    """`limit`/`offset` page through results, most recent first (default
+    page size and hard cap enforced in news_service.list_news, so an
+    out-of-range value here is clamped rather than rejected)."""
     if include_inactive and current_user.role not in (UserRole.ADMIN, UserRole.OPERATOR):
         include_inactive = False
-    return news_service.list_news(db, include_inactive)
+    return news_service.list_news(db, include_inactive, limit, offset)
 
 @router.post("/", response_model=NewsResponse, status_code=201)
+@limiter.limit(WRITE_LIMIT)
 def create_news(
+    request: Request,
     payload: NewsCreate,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
@@ -40,7 +54,9 @@ def get_news_item(
     return news_service.get_news(db, news_id)
 
 @router.patch("/{news_id}", response_model=NewsResponse)
+@limiter.limit(WRITE_LIMIT)
 def update_news(
+    request: Request,
     news_id: int,
     payload: NewsUpdate,
     db: Session = Depends(get_db),
@@ -49,7 +65,9 @@ def update_news(
     return news_service.update_news(db, news_id, payload)
 
 @router.delete("/{news_id}", status_code=204)
+@limiter.limit(WRITE_LIMIT)
 def delete_news(
+    request: Request,
     news_id: int,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),

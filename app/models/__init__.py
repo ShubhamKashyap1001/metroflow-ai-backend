@@ -5,12 +5,16 @@ from app.models.line_station import LineStation
 from app.models.journey import Journey
 from app.models.train import Train
 from app.models.train_schedule import TrainSchedule
+from app.models.train_schedule_history import TrainScheduleHistory
 from app.models.train_location import TrainLocation
 from app.models.crowd_log import CrowdLog
+from app.models.station_crowd_state import StationCrowdState
+from app.models.crowd_log_hourly import CrowdLogHourly
 from app.models.prediction import Prediction
 from app.models.alert import Alert
 from app.models.ai_model import AIModel
 from app.models.notification_log import NotificationLog
 from app.models.notification import Notification
+from app.models.notification_dispatch_job import NotificationDispatchJob
 from app.models.enquiry import Enquiry
 from app.models.news import News

@@ -1,3 +1,9 @@
+"""State-wise metadata for the frontend's navbar state selector.
+
+Not a data module of its own - just aggregates Station/Train counts
+per state so the UI knows which states have real, seeded data (and
+which ones need more CSV rows before they're worth showing).
+"""
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query

@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
 from sqlalchemy import ForeignKey
+from sqlalchemy import Index
 from sqlalchemy import String
 
 from sqlalchemy.dialects.postgresql import UUID
@@ -28,6 +29,20 @@ from app.mixins.timestamp import TimestampMixin
 class Enquiry(TimestampMixin, Base):
 
     __tablename__ = "enquiries"
+
+    # BUGFIX (expensive analytics/user/enquiry queries): this table had
+    # NO indexes at all beyond the primary key. enquiry_service.py's
+    # list_enquiries() is hit on every "My Enquiries" page load (filtered
+    # by user_id, ordered by created_at) and every admin "manage
+    # enquiries" queue load (no filter, ordered by created_at), and
+    # get_enquiry_stats() groups by status for the same user_id filter -
+    # every one of those was a full Seq Scan of the whole enquiries
+    # table, getting linearly slower as more enquiries pile up.
+    __table_args__ = (
+        Index("ix_enquiries_user_id_created_at", "user_id", "created_at"),
+        Index("ix_enquiries_status", "status"),
+        Index("ix_enquiries_created_at", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 

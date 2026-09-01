@@ -1,4 +1,78 @@
+"""Small Redis-backed cache helper.
 
+Why this exists: `redis` has been sitting in requirements.txt but was
+never actually wired into the app anywhere - no client, no
+get/set calls. Meanwhile app/services/crowd_service.py's
+get_station_wise_snapshot() (the dashboard/heatmap/congestion query)
+runs a ROW_NUMBER() window query over the whole crowd_logs table on
+every single request, and gets hit repeatedly per client (websocket
+push + polling both trigger a refetch). This module gives that - and
+any other hot read endpoint - a real cache in front of the DB.
+
+Design choices:
+  - get_json/set_json degrade to a no-op / cache-miss if Redis is
+    unreachable (connection refused, DNS failure, timeout, etc.) so a
+    missing/down Redis never takes the API down - it just falls back
+    to hitting the DB every time, same as before this change.
+  - A short, fixed TTL (settings.CACHE_TTL_SECONDS) is used instead of
+    manual invalidation on write. The data this caches (live crowd
+    counts) already changes every SIMULATOR_INTERVAL_SECONDS, so a TTL
+    of the same size bounds staleness to what the UI already tolerates,
+    without needing to track/invalidate a cache key per station per
+    state filter on every write.
+
+Milestone 16 - Redis Runtime Optimization
+------------------------------------------
+Two real production bugs existed here before this milestone, both
+only visible under an actual Redis outage (not on a happy-path dev
+box where Redis is always up):
+
+1. `_client_init_attempted` was a one-shot flag. If Redis was down (or
+   just not up yet - a container-startup race) the very first time
+   any endpoint touched the cache, `_client` stayed `None` FOREVER -
+   the app would never try Redis again for the rest of the process's
+   life, even once Redis came back. There was no retry at all, let
+   alone one with backoff.
+
+2. `cache.get_json`/`set_json`/`delete` are called on nearly every
+   request (auth's per-request profile lookup in core/security.py,
+   the crowd dashboard, schedules, train positions, predictions all
+   go through this module). Each one logged a `logger.warning(...)`
+   on every single failure - so a down/timing-out Redis didn't just
+   degrade quietly to the DB path as the module's own docstring
+   claims, it also flooded the logs with one warning line per request
+   per cache call, which is itself a production hazard (log volume,
+   noise that buries real problems) and directly fails the
+   milestone's "no Redis timeout logs" validation target.
+
+Fix: a small reconnect state machine with exponential backoff.
+  - While Redis is believed to be up, we use the client directly - no
+    extra ping-per-call latency added.
+  - The moment an operation fails, we mark Redis "down", close the
+    dead client, log ONCE (state transition, at WARNING), and set a
+    `next_retry_at` a short backoff away.
+  - While down, every cache call is a monotonic-clock comparison and
+    an immediate cache-miss/no-op - zero network I/O, zero log lines,
+    so a sustained outage costs the request path nothing beyond what
+    it already pays for the DB fallback (satisfies "never block
+    requests").
+  - Once `next_retry_at` has passed, the NEXT cache call gets to try
+    reconnecting. Success resets the backoff to the floor and logs
+    ONCE (state transition back to up, at INFO). A repeat failure
+    silently doubles the backoff (capped) and does NOT log again -
+    `_log_state_change` only fires on an actual up/down transition, so
+    a sustained outage produces exactly two log lines for its entire
+    duration (one when it starts, one when it ends) no matter how long
+    it lasts or how many requests come in during it, instead of one
+    warning per request.
+  - Each individual redis-py call additionally uses redis-py's own
+    built-in retry-with-exponential-backoff (`retry_on_timeout=True`,
+    `retry_on_error=[...]`, `Retry(ExponentialBackoff(...), retries=1)`)
+    so a single transient blip (one dropped packet, one slow GC pause
+    on the Redis side) is retried once, sub-100ms, before we give up
+    and fall through to the DB - without that one retry escalating
+    into "mark the whole client down" for what was just a hiccup.
+"""
 import json
 import logging
 import threading
@@ -10,6 +84,7 @@ import redis.exceptions
 from redis.backoff import ExponentialBackoff
 from redis.retry import Retry
 
+from app.core import metrics
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -70,6 +145,16 @@ def _mark_down(exc: Exception) -> None:
     _next_retry_at = time.monotonic() + _current_backoff
     _log_state_change(False, repr(exc))
     _current_backoff = min(_current_backoff * 2, _BACKOFF_CAP_SECONDS)
+    # Redis failure metric (see app/core/metrics.py) - only the
+    # exception's class name is used as the label, never repr(exc)
+    # (already logged above, server-side only) which can contain the
+    # Redis connection string/credentials. Every get_json/set_json/
+    # set_nx/delete failure funnels through this one function, so this
+    # is the single place that needs to record it.
+    try:
+        metrics.record_redis_failure(type(exc).__name__)
+    except Exception:
+        pass
 
 def _mark_up() -> None:
     global _current_backoff
@@ -142,6 +227,36 @@ def set_json(key: str, value: Any, ttl_seconds: int | None = None) -> None:
     except Exception as exc:                
         _mark_down(exc)
 
+def set_nx(key: str, ttl_seconds: int) -> bool:
+    """Atomically set `key` to a sentinel value with an expiry, but only
+    if it doesn't already exist (Redis `SET key val NX EX ttl`).
+
+    Returns True if this call won the race (the key was absent and is
+    now set - the caller should proceed with whatever it's guarding),
+    or False if the key was already present (someone else already did
+    that work recently - the caller should skip it).
+
+    This is a *write* dedupe guard, distinct from get_json/set_json's
+    *value* cache above - e.g. "don't insert another DB row for this
+    station for the next N seconds" rather than "don't recompute this
+    value for the next N seconds" (added for prediction_service's
+    smart_recommendations() write-storm fix - Phase 1, P2-3).
+
+    Fails OPEN (returns True) on a disabled/unreachable Redis, same
+    fail-open philosophy as the rest of this module: a down cache never
+    blocks the underlying write, it just loses the de-dup optimization
+    for the duration of the outage - identical to write behaviour
+    before this helper existed.
+    """
+    client = _get_client()
+    if client is None:
+        return True
+    try:
+        return bool(client.set(key, "1", nx=True, ex=ttl_seconds))
+    except Exception as exc:                
+        _mark_down(exc)
+        return True
+
 def delete(key: str) -> None:
     client = _get_client()
     if client is None:
@@ -153,6 +268,76 @@ def delete(key: str) -> None:
 
 def delete_key(key: str) -> None:
     delete(key)
+
+def get_client() -> "redis.Redis | None":
+    """Expose the same managed, auto-reconnecting client used above, for
+    callers that need a Redis primitive this module doesn't already wrap
+    (Lua scripts, pub/sub). Same fail-open contract as get_json/set_json:
+    returns None if caching is disabled or Redis is currently believed to
+    be down - never raises. Added for Milestone/Phase 4 (leader election
+    lock + the WebSocket cross-process relay), see leader_election.py and
+    websocket/manager.py."""
+    return _get_client()
+
+                                                                     
+_ACQUIRE_OR_RENEW_LOCK_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+if current == false or current == ARGV[1] then
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+    return 1
+else
+    return 0
+end
+"""
+
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('DEL', KEYS[1])
+    return 1
+else
+    return 0
+end
+"""
+
+def try_acquire_or_renew_lock(key: str, holder_id: str, ttl_seconds: int) -> bool:
+    """Atomic compare-and-set lease acquire/renew (Redis `SET key val NX`
+    generalised to also let the CURRENT holder renew its own lease without
+    a gap). Returns True if `holder_id` now holds the lease (either it was
+    free, or `holder_id` already held it and just extended it), False if
+    someone else currently holds it.
+
+    This is the primitive app/simulator/leader_election.py polls on to
+    guarantee only one worker process runs a given background loop at a
+    time: the lease has a TTL, so a crashed holder's lease expires on its
+    own (automatic failover) instead of needing an explicit crash-detection
+    mechanism.
+
+    Uses a Lua script (EVAL) so the GET-then-SET is atomic - two processes
+    racing to acquire the same free key can never both succeed."""
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        result = client.eval(_ACQUIRE_OR_RENEW_LOCK_SCRIPT, 1, key, holder_id, ttl_seconds)
+    except Exception as exc:                
+        _mark_down(exc)
+        return False
+    return bool(result)
+
+def release_lock(key: str, holder_id: str) -> bool:
+    """Best-effort early release of a lease held by `holder_id` (e.g. on
+    graceful shutdown, so the next election doesn't have to wait out the
+    full TTL). Only deletes the key if `holder_id` is still the current
+    holder - never releases a lease someone else already won."""
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        result = client.eval(_RELEASE_LOCK_SCRIPT, 1, key, holder_id)
+    except Exception as exc:                
+        _mark_down(exc)
+        return False
+    return bool(result)
 
 def redis_status() -> dict:
     """Structured Redis health snapshot for the /health endpoint (Feature

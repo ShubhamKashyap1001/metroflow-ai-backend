@@ -6,10 +6,9 @@ same treatment as app/api/v1/prediction.py - these aggregate over the
 whole dataset and shouldn't be open to anonymous/unlimited traffic.
 """
 from fastapi import APIRouter, Depends, Request
-from slowapi import Limiter
-from slowapi.util import get_ipaddr
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import limiter
 from app.core.security import get_current_user
 from app.database.session import get_db
 from app.models.user_profile import UserProfile
@@ -21,8 +20,6 @@ router = APIRouter(
     prefix="/analytics",
     tags=["Analytics"]
 )
-
-limiter = Limiter(key_func=get_ipaddr)
 
 @router.get("/traffic-report")
 @limiter.limit("20/minute")

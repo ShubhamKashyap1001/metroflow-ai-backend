@@ -1,96 +1,157 @@
-import asyncio
-import logging
+"""Starts/stops the four background loops (crowd simulator, train
+tracker, crowd retention job, notification bin retention job), each
+behind its own LeaderElection so that when multiple API worker
+processes are running, only ONE process actually executes a given loop
+at a time (see leader_election.py for why, and docs/background-jobs-and-leader-election.md
+for the full bug writeup).
+
+Public API (start_simulator, stop_simulator, start_train_tracker,
+stop_train_tracker, start_retention_job, stop_retention_job,
+is_simulator_running, is_train_tracker_running, is_retention_job_running,
+scheduler_status) is unchanged from Phase <=3 on purpose - app/main.py,
+app/api/v1/admin.py and app/api/v1/health.py call these exact names and
+need zero changes for this fix. The notification-bin job added here
+follows the same naming convention (start_/stop_/is_..._running) so it
+slots into the same callers with one extra pair of calls each.
+"""
+import functools
 
 from app.simulator.csv_replay_simulator import run_forever as run_crowd_forever
+from app.simulator.leader_election import LeaderElection
+from app.simulator.notification_bin_retention import (
+    run_forever as run_notification_bin_retention_forever,
+)
+from app.simulator.retention import run_forever as run_retention_forever
 from app.simulator.train_simulator import run_forever as run_train_forever
 
-logger = logging.getLogger(__name__)
+_crowd_election: LeaderElection | None = None
+_train_election: LeaderElection | None = None
+_retention_election: LeaderElection | None = None
+_notification_bin_retention_election: LeaderElection | None = None
 
-_crowd_task: asyncio.Task | None = None
-_train_task: asyncio.Task | None = None
-
-def _log_task_result(name: str, task: asyncio.Task) -> None:
-    """Task monitoring: run_forever() loops forever and only ever exits
-    via cancellation (graceful stop) or - if something outside the
-    per-tick try/except in run_forever managed to escape (e.g. the
-    session_factory() call itself raising) - an unexpected crash. This
-    logs the difference so a background loop dying silently doesn't go
-    unnoticed until someone wonders why the dashboard stopped updating.
-    """
-    if task.cancelled():
-        logger.info("[scheduler] %s stopped (cancelled).", name)
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("[scheduler] %s exited unexpectedly: %s", name, exc, exc_info=exc)
-    else:
-        logger.warning("[scheduler] %s exited without being cancelled - this shouldn't happen "
-                        "since run_forever() loops forever.", name)
 
 def start_simulator(session_factory, interval_seconds: int = 5) -> None:
-    global _crowd_task
-                                                                      
-    if _crowd_task is None or _crowd_task.done():
-        _crowd_task = asyncio.create_task(run_crowd_forever(session_factory, interval_seconds))
-        _crowd_task.add_done_callback(lambda t: _log_task_result("crowd simulator", t))
+    global _crowd_election
+    if _crowd_election is None:
+        _crowd_election = LeaderElection(
+            "crowd_simulator",
+            functools.partial(run_crowd_forever, session_factory, interval_seconds),
+        )
+    _crowd_election.start()
 
 async def stop_simulator() -> None:
-    global _crowd_task
-    if _crowd_task is not None:
-        task, _crowd_task = _crowd_task, None
-        task.cancel()
-        try:
-                                                                        
-            await task
-        except asyncio.CancelledError:
-            pass
+    global _crowd_election
+    if _crowd_election is not None:
+        election, _crowd_election = _crowd_election, None
+        await election.stop()
 
 def start_train_tracker(session_factory, interval_seconds: int = 5) -> None:
-    global _train_task
-    if _train_task is None or _train_task.done():
-        _train_task = asyncio.create_task(run_train_forever(session_factory, interval_seconds))
-        _train_task.add_done_callback(lambda t: _log_task_result("train tracker", t))
+    global _train_election
+    if _train_election is None:
+        _train_election = LeaderElection(
+            "train_tracker",
+            functools.partial(run_train_forever, session_factory, interval_seconds),
+        )
+    _train_election.start()
 
 async def stop_train_tracker() -> None:
-    global _train_task
-    if _train_task is not None:
-        task, _train_task = _train_task, None
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    global _train_election
+    if _train_election is not None:
+        election, _train_election = _train_election, None
+        await election.stop()
 
 def is_simulator_running() -> bool:
-    return _crowd_task is not None and not _crowd_task.done()
+    return _crowd_election is not None and _crowd_election.is_active()
 
 def is_train_tracker_running() -> bool:
-    return _train_task is not None and not _train_task.done()
+    return _train_election is not None and _train_election.is_active()
 
-def _task_status(task: asyncio.Task | None) -> dict:
-    """One background loop's status, in enough detail to tell "never
-    started" apart from "was running and crashed" apart from "was
-    running and cleanly stopped" - a plain running bool collapses all
-    three into the same `false`, which is exactly the distinction you
-    need when a monitoring dashboard is asking "why did live updates
-    stop"."""
-    if task is None:
+def start_retention_job(session_factory, interval_seconds: int | None = None) -> None:
+    global _retention_election
+    if _retention_election is None:
+        _retention_election = LeaderElection(
+            "crowd_retention_job",
+            functools.partial(run_retention_forever, session_factory, interval_seconds),
+        )
+    _retention_election.start()
+
+async def stop_retention_job() -> None:
+    global _retention_election
+    if _retention_election is not None:
+        election, _retention_election = _retention_election, None
+        await election.stop()
+
+def is_retention_job_running() -> bool:
+    return _retention_election is not None and _retention_election.is_active()
+
+def start_notification_bin_retention_job(session_factory, interval_seconds: int | None = None) -> None:
+    global _notification_bin_retention_election
+    if _notification_bin_retention_election is None:
+        _notification_bin_retention_election = LeaderElection(
+            "notification_bin_retention_job",
+            functools.partial(run_notification_bin_retention_forever, session_factory, interval_seconds),
+        )
+    _notification_bin_retention_election.start()
+
+async def stop_notification_bin_retention_job() -> None:
+    global _notification_bin_retention_election
+    if _notification_bin_retention_election is not None:
+        election, _notification_bin_retention_election = _notification_bin_retention_election, None
+        await election.stop()
+
+def is_notification_bin_retention_job_running() -> bool:
+    return (
+        _notification_bin_retention_election is not None
+        and _notification_bin_retention_election.is_active()
+    )
+
+
+def _election_status(election: LeaderElection | None) -> dict:
+    if election is None:
         return {"running": False, "state": "not_started"}
-    if not task.done():
-        return {"running": True, "state": "running"}
-    if task.cancelled():
-        return {"running": False, "state": "stopped"}
-    if task.exception() is not None:
-        return {"running": False, "state": "crashed", "error": str(task.exception())}
-    return {"running": False, "state": "exited"}
+    return election.status()
+
+def _election_metrics_snapshot(name: str, election: LeaderElection | None) -> dict:
+    if election is None:
+        return {
+            "name": name,
+            "state": "not_started",
+            "heartbeat_ticks_total": 0,
+            "leadership_acquired_total": 0,
+            "leadership_lost_total": 0,
+            "worker_crashes_total": 0,
+            "last_heartbeat_ts": None,
+        }
+    return election.get_metrics_snapshot()
+
+def scheduler_metrics_snapshot() -> list[dict]:
+    """Per-loop leader/heartbeat snapshots for app/core/metrics.py's
+    simulator collector - the metrics-shaped counterpart to
+    scheduler_status() above. Each entry always carries the loop's own
+    `name` (rather than requiring the caller to already know the four
+    fixed loop names), so a not-yet-started loop still yields a zeroed
+    row instead of being silently omitted."""
+    return [
+        _election_metrics_snapshot("crowd_simulator", _crowd_election),
+        _election_metrics_snapshot("train_tracker", _train_election),
+        _election_metrics_snapshot("crowd_retention_job", _retention_election),
+        _election_metrics_snapshot(
+            "notification_bin_retention_job", _notification_bin_retention_election
+        ),
+    ]
 
 def scheduler_status() -> dict:
-    """Structured snapshot of both background loops (crowd simulator +
-    train tracker) - consumed by the /health endpoint so external
-    liveness/monitoring checks can see at a glance whether either loop
-    has silently died, and by /admin/simulator for the same detail in
-    the admin UI."""
+    """Structured snapshot of all three background loops - consumed by
+    the /health endpoint so external liveness/monitoring checks can see
+    at a glance whether either loop has silently died, and by
+    /admin/simulator for the same detail in the admin UI. `state` is
+    now one of "not_started" | "leader" | "standby" | "crashed" - a
+    process reporting "standby" is healthy and expected in a
+    multi-worker deployment: it means another process is holding
+    leadership for that loop, not that anything is broken."""
     return {
-        "crowd_simulator": _task_status(_crowd_task),
-        "train_tracker": _task_status(_train_task),
+        "crowd_simulator": _election_status(_crowd_election),
+        "train_tracker": _election_status(_train_election),
+        "crowd_retention_job": _election_status(_retention_election),
+        "notification_bin_retention_job": _election_status(_notification_bin_retention_election),
     }

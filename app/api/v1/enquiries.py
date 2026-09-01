@@ -1,16 +1,15 @@
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import WRITE_LIMIT, limiter
 from app.core.security import get_current_user, require_roles
 from app.database.session import get_db
 from app.enums.enquiry_status import EnquiryStatus
 from app.enums.user_role import UserRole
 from app.models.user_profile import UserProfile
-from app.schemas.enquiry import EnquiryCreate, EnquiryResolve, EnquiryResponse
-from app.services import enquiry_service
-
 from app.schemas.enquiry import EnquiryCreate, EnquiryResolve, EnquiryResponse, EnquiryStats
+from app.services import enquiry_service
 
 router = APIRouter(
     prefix="/enquiries",
@@ -20,13 +19,17 @@ router = APIRouter(
 @router.get("/", response_model=list[EnquiryResponse])
 def get_enquiries(
     status: EnquiryStatus | None = None,
+    limit: int = enquiry_service.DEFAULT_ENQUIRIES_LIMIT,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    return enquiry_service.list_enquiries(db, current_user, status)
+    return enquiry_service.list_enquiries(db, current_user, status, limit, offset)
 
 @router.post("/", response_model=EnquiryResponse, status_code=201)
+@limiter.limit(WRITE_LIMIT)
 def create_enquiry(
+    request: Request,
     payload: EnquiryCreate,
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
@@ -49,7 +52,9 @@ def get_enquiry(
     return enquiry_service.get_enquiry(db, enquiry_id, current_user)
 
 @router.patch("/{enquiry_id}/resolve", response_model=EnquiryResponse)
+@limiter.limit(WRITE_LIMIT)
 def resolve_enquiry(
+    request: Request,
     enquiry_id: int,
     payload: EnquiryResolve,
     db: Session = Depends(get_db),

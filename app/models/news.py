@@ -1,3 +1,13 @@
+"""News & Announcements module.
+
+Admin/operator-authored notices ("latest news") shown to every
+passenger on the Enquiry & News page - service updates, general
+announcements, etc. Deliberately separate from the Alert module
+(app/models/alert.py), which is station-scoped and time-critical
+(overcrowding/delay/emergency) with email/SMS dispatch. News items are
+lighter-weight, not tied to a station, and not dispatched by
+email/SMS - just published/unpublished.
+"""
 from sqlalchemy import Boolean
 from sqlalchemy import ForeignKey
 from sqlalchemy import String

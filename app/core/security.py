@@ -1,4 +1,16 @@
+"""Auth is fully delegated to Supabase now.
 
+The frontend calls `supabase.auth.signInWithPassword()` /
+`supabase.auth.signUp()` directly and gets back a Supabase-issued
+JWT. This backend never sees a password - it only ever verifies the
+JWT Supabase already issued, then looks up (or lazily creates) the
+matching row in `user_profiles` for role-based access control.
+
+Supports both Supabase JWT signing modes:
+  - Legacy HS256 shared secret (set SUPABASE_JWT_SECRET in .env)
+  - Newer asymmetric signing keys, verified via the project's JWKS
+    endpoint (used automatically if SUPABASE_JWT_SECRET is empty)
+"""
 import json
 import time
 import urllib.request
@@ -134,9 +146,10 @@ def invalidate_user_cache(user_id: uuid.UUID) -> None:
     cache.delete(_profile_cache_key(user_id))
 
 def _get_or_create_profile_by_email(db: Session, email: str) -> UserProfile:
-    """TEMPORARY dev bypass (settings.AUTH_DISABLED=True): no Supabase
-    token to read a `sub` UUID from, so derive a stable UUID from the
-    email itself - the same email always maps to the same profile row."""
+    """TEMPORARY dev bypass (settings.dev_auth_bypass_enabled, i.e.
+    AUTH_DISABLED=True AND DEBUG=True): no Supabase token to read a
+    `sub` UUID from, so derive a stable UUID from the email itself -
+    the same email always maps to the same profile row."""
     email = email.strip().lower()
     user_id = uuid.uuid5(uuid.NAMESPACE_DNS, email)
 
@@ -224,7 +237,7 @@ def get_user_from_token_optional(token: str | None, db: Session) -> UserProfile 
     if not token:
         return None
     try:
-        if settings.AUTH_DISABLED:
+        if settings.dev_auth_bypass_enabled:
             user = _get_or_create_profile_by_email(db, token)
         else:
             payload = _decode_supabase_token(token)
@@ -248,8 +261,8 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if settings.AUTH_DISABLED:
-                                                                      
+    if settings.dev_auth_bypass_enabled:
+
         user = _get_or_create_profile_by_email(db, token)
         if not user.is_active:
             raise HTTPException(status_code=403, detail="Account is disabled")

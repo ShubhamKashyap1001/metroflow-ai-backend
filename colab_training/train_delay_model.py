@@ -34,7 +34,7 @@ from xgboost import XGBRegressor
 from _real_dataset_builder import build_delay_dataset
 
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
-            "passenger_count", "capacity_passengers", "train_age_days"]
+            "passenger_count", "capacity_passengers", "train_age_days", "weather_code"]
 TARGET = "delay_minutes"
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "output")

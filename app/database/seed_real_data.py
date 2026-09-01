@@ -1,4 +1,3 @@
-
 import argparse
 import os
 from datetime import date, datetime
@@ -8,6 +7,7 @@ from sqlalchemy import text
 
 from app.database.init_db import create_tables
 from app.database.session import SessionLocal
+from app.enums.crowd_level import CrowdLevel
 from app.enums.day_type import DayType
 from app.enums.schedule_status import ScheduleStatus
 from app.models.alert import Alert
@@ -17,11 +17,85 @@ from app.models.line_station import LineStation
 from app.models.metro_line import MetroLine
 from app.models.prediction import Prediction
 from app.models.station import Station
+from app.models.station_crowd_state import StationCrowdState
 from app.models.train import Train
 from app.models.train_location import TrainLocation
 from app.models.train_schedule import TrainSchedule
+from app.models.train_schedule_history import TrainScheduleHistory
 
 DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets")
+
+DEFAULT_CAPACITY = 2400
+
+def _derive_station_capacities(flow_df: pd.DataFrame) -> dict[str, int]:
+    """Reverse-engineer each station's real capacity from the dataset's
+    own crowding_index column instead of hardcoding one number for
+    every station (Phase 3 fix, Bug 2 - see docs/crowd-data-correctness.md).
+
+    crowding_index is defined by the dataset as
+    (entries + exits) / capacity, clipped at 1.5 for real overcrowding
+    (verified: max observed crowding_index across the whole dataset is
+    exactly 1.5). Solving for capacity per row
+    (`(entries + exits) / crowding_index`) and taking the PER-STATION
+    MEDIAN (not mean, so a handful of clipped/extreme rows can't skew
+    it) recovers a stable, station-specific capacity.
+    """
+    df = flow_df[flow_df["crowding_index"] > 0].copy()
+    df["implied_capacity"] = (df["entries"] + df["exits"]) / df["crowding_index"]
+    return df.groupby("station_id")["implied_capacity"].median().round().astype(int).to_dict()
+
+
+def _build_seed_crowd_rows(
+    flow_df: pd.DataFrame, station_rows: dict[str, Station]
+) -> tuple[list[CrowdLog], list[dict]]:
+    """Seed BOTH the historical table (crowd_logs) and the live table
+    (station_crowd_state) with real, correctly-computed values instead
+    of the old single fabricated "average throughput" row per station
+    (Phase 3 fix, Bug 3 - see docs/crowd-data-correctness.md).
+
+    Walks each station's own real first calendar day of
+    passenger_flow.csv rows (chronological order) through the SAME
+    net-flow occupancy accumulator csv_replay_simulator.py uses at
+    runtime (occupancy += entries - exits, clamped at 0) - so the seed
+    data and the live simulator agree on what "current_count" means,
+    instead of the seed using throughput and the simulator using
+    occupancy. The last hour of that walk becomes each station's
+    initial `station_crowd_state` row, which fixes the second half of
+    Bug 3: previously station_crowd_state was left completely empty
+    until the simulator's first tick, so the dashboard/heatmap had no
+    live data for however long that took.
+    """
+    df = flow_df.sort_values(["station_id", "timestamp"])
+    crowd_logs: list[CrowdLog] = []
+    live_state_rows: list[dict] = []
+
+    for station_id, group in df.groupby("station_id"):
+        db_station = station_rows.get(station_id)
+        if db_station is None:
+            continue
+        first_day = group["timestamp"].dt.date.iloc[0]
+        day_rows = group[group["timestamp"].dt.date == first_day]
+
+        capacity = db_station.capacity or DEFAULT_CAPACITY
+
+        occupancy = 0.0
+        for _, row in day_rows.iterrows():
+            occupancy = max(0.0, occupancy + row["entries"] - row["exits"])
+
+            level = CrowdLevel.from_ratio(occupancy / capacity if capacity else 0)
+            crowd_logs.append(CrowdLog(
+                station_id=db_station.id,
+                current_count=int(round(occupancy)),
+                crowd_level=level,
+            ))
+
+        live_state_rows.append({
+            "station_id": db_station.id,
+            "current_count": int(round(occupancy)),
+            "crowd_level": level,
+        })
+
+    return crowd_logs, live_state_rows
 
 LINE_COLORS = ["#1E88E5", "#8E24AA", "#E53935", "#00897B", "#6A1B9A", "#F4511E"]
 NAMED_LINE_COLORS = {
@@ -65,8 +139,9 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                                                                          
             db.execute(text(
                 "TRUNCATE TABLE journeys, predictions, train_locations, alerts, "
-                "crowd_logs, train_schedules, line_stations, metro_lines, "
-                "stations, trains RESTART IDENTITY CASCADE"
+                "crowd_logs, station_crowd_state, train_schedule_history, "
+                "train_schedules, line_stations, metro_lines, stations, trains "
+                "RESTART IDENTITY CASCADE"
             ))
             db.commit()
         elif db.query(Station).count() > 0:
@@ -82,6 +157,10 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             subset=["station_id", "city", "line", "station_name", "latitude", "longitude"]
         )
 
+        flow_df_for_capacity = raw["passenger_flow"].copy()
+        flow_df_for_capacity["station_id"] = flow_df_for_capacity["station_id"].astype(str).str.strip()
+        capacities = _derive_station_capacities(flow_df_for_capacity)
+
         station_rows: dict[str, Station] = {}
         station_list: list[Station] = []
         for _, row in stations_df.iterrows():
@@ -92,7 +171,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                 latitude=float(row["latitude"]),
                 longitude=float(row["longitude"]),
                 is_interchange=False,
-                capacity=5000,
+                capacity=capacities.get(row["station_id"], DEFAULT_CAPACITY),
             )
             station_list.append(station)
             station_rows[row["station_id"]] = station
@@ -143,22 +222,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.add_all(train_list)
         db.flush()
 
-        # Commit stations/lines/line_stations/trains now, before the
-        # train_operations loop below. Without this, everything since
-        # SessionLocal() was opened stays uncommitted (flush() assigns
-        # IDs but doesn't end the transaction) for as long as the
-        # ~469K-row schedule loop takes to run - often several minutes
-        # on a remote DB. A transaction left open that long is exactly
-        # what a connection pooler in front of Postgres (e.g. Supabase's
-        # pgbouncer in transaction-pooling mode) or the DB's own idle/
-        # statement timeout will kill, which surfaces later as
-        # "psycopg2.OperationalError: server closed the connection
-        # unexpectedly" on some unrelated later commit - confusing,
-        # since the actual cause is this stale, still-open transaction,
-        # not whatever commit happened to be running when it got killed.
-        # Committing here makes this data durable immediately and lets
-        # the long schedule loop start on a fresh, short-lived
-        # transaction per chunk (see CHUNK_SIZE below), same reasoning.
         db.commit()
         print(f"  stations/lines/trains: {len(station_list)} stations, "
               f"{len(line_list)} lines, {len(train_list)} trains committed.")
@@ -171,89 +234,124 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         ops_df["scheduled_arrival"] = pd.to_datetime(ops_df["scheduled_arrival"])
         ops_df["scheduled_departure"] = pd.to_datetime(ops_df["scheduled_departure"])
 
-        # train_operations.csv.gz is ~469K rows. Building all of those as
-        # live ORM TrainSchedule() objects and handing them to a single
-        # db.add_all(...) + one db.commit() at the very end (the original
-        # approach) opens ONE transaction that has to hold ~469K rows'
-        # worth of INSERT statements plus SQLAlchemy's identity-map
-        # bookkeeping for every one of those objects for the entire
-        # duration. In practice that's what was crashing the seed with
-        # "server closed the connection unexpectedly" - a transaction
-        # that large/long-running gets killed by the DB server itself
-        # (statement/idle timeouts), by a pooler in front of it (e.g.
-        # Supabase's pgbouncer in transaction mode), or just by ordinary
-        # network flakiness over however many minutes it takes.
-        #
-        # Fix: build plain dicts (no ORM identity-map overhead) and
-        # insert them in bounded chunks via bulk_insert_mappings, with a
-        # commit after every chunk. Each chunk is its own short
-        # transaction, so a drop mid-seed loses at most one chunk's
-        # worth of rows (re-running with --reset starts clean anyway),
-        # and no single transaction ever has to stay open for the whole
-        # 469K-row load.
+        ops_df["actual_arrival"] = pd.to_datetime(ops_df["actual_arrival"], errors="coerce")
+        ops_df["actual_departure"] = pd.to_datetime(ops_df["actual_departure"], errors="coerce")
+
+        ops_df = ops_df.sort_values(["train_id", "station_id", "scheduled_arrival"])
+
         CHUNK_SIZE = 5000
-        schedule_dicts: list[dict] = []
+        history_dicts: list[dict] = []
+        timetable_by_slot: dict[tuple[int, int, DayType], dict] = {}
         dropped = 0
-        inserted = 0
+        history_inserted = 0
         for _, orow in ops_df.iterrows():
             train = train_by_number.get(orow["train_id"])
             db_station = station_rows.get(orow["station_id"])
             if not train or not db_station:
                 dropped += 1
                 continue
-            is_weekend = int(orow["scheduled_arrival"].weekday() >= 5)
-            hour = orow["scheduled_arrival"].hour
+
+            arrival_dt = orow["scheduled_arrival"]
+            departure_dt = orow["scheduled_departure"]
+            is_weekend = arrival_dt.weekday() >= 5
+            hour = arrival_dt.hour
             is_peak = 8 <= hour <= 11 or 17 <= hour <= 20
-            delay_minutes = int(round(orow["delay_arrival_min"]))
-            schedule_dicts.append({
+            day_type = DayType.WEEKEND if is_weekend else DayType.WEEKDAY
+            delay_arrival = float(orow["delay_arrival_min"])
+            delay_departure = float(orow.get("delay_departure_min", 0) or 0)
+            station_sequence = int(orow["station_sequence"])
+
+            # 1. Full-granularity history row - always inserted.
+            history_dicts.append({
+                "trip_id": str(orow["trip_id"]),
                 "train_id": train.id,
                 "station_id": db_station.id,
-                "arrival_time": orow["scheduled_arrival"].time(),
-                "departure_time": orow["scheduled_departure"].time(),
-                "platform_number": (int(orow["station_sequence"]) % 2) + 1,
-                "day_type": DayType.WEEKEND if is_weekend else DayType.WEEKDAY,
+                "service_date": arrival_dt.date(),
+                "station_sequence": station_sequence,
+                "scheduled_arrival": arrival_dt.time(),
+                "scheduled_departure": departure_dt.time(),
+                "actual_arrival": orow["actual_arrival"].time() if pd.notna(orow["actual_arrival"]) else None,
+                "actual_departure": orow["actual_departure"].time() if pd.notna(orow["actual_departure"]) else None,
+                "delay_arrival_min": delay_arrival,
+                "delay_departure_min": delay_departure,
+                "passenger_density": orow.get("passenger_density") or None,
+                "weather": orow.get("weather") or None,
+                "delay_reason": orow["delay_reason"] if orow["delay_reason"] != "None" else None,
+            })
+            if len(history_dicts) >= CHUNK_SIZE:
+                db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
+                db.commit()
+                history_inserted += len(history_dicts)
+                print(f"  train_schedule_history: {history_inserted}/{len(ops_df) - dropped} inserted...", end="\r")
+                history_dicts = []
+
+            # 2. Canonical timetable slot - overwritten as we go, sorted
+            # chronologically, so whatever's left in the dict at the end
+            # is each slot's MOST RECENT occurrence.
+            delay_minutes = int(round(delay_arrival))
+            timetable_by_slot[(train.id, db_station.id, day_type)] = {
+                "train_id": train.id,
+                "station_id": db_station.id,
+                "arrival_time": arrival_dt.time(),
+                "departure_time": departure_dt.time(),
+                "platform_number": (station_sequence % 2) + 1,
+                "station_sequence": station_sequence,
+                "day_type": day_type,
                 "is_peak_hour": bool(is_peak),
                 "frequency_minutes": 5 if is_peak else 12,
                 "delay_minutes": delay_minutes,
                 "status": ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
-            })
-            if len(schedule_dicts) >= CHUNK_SIZE:
-                db.bulk_insert_mappings(TrainSchedule, schedule_dicts)
-                db.commit()
-                inserted += len(schedule_dicts)
-                print(f"  train_schedules: {inserted}/{len(ops_df) - dropped} inserted...", end="\r")
-                schedule_dicts = []
-        if schedule_dicts:
-            db.bulk_insert_mappings(TrainSchedule, schedule_dicts)
+            }
+        if history_dicts:
+            db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
             db.commit()
-            inserted += len(schedule_dicts)
+            history_inserted += len(history_dicts)
         if dropped:
             print(f"\ntrain_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
-        print(f"  train_schedules: {inserted} inserted (done).")
+        print(f"  train_schedule_history: {history_inserted} inserted (done).")
 
+        timetable_dicts = list(timetable_by_slot.values())
+        for i in range(0, len(timetable_dicts), CHUNK_SIZE):
+            db.bulk_insert_mappings(TrainSchedule, timetable_dicts[i:i + CHUNK_SIZE])
+            db.commit()
+        print(f"  train_schedules: {len(timetable_dicts)} canonical slots inserted "
+              f"(collapsed from {history_inserted} historical rows).")
+
+        # Phase 3 fix (Bug 3): both entries here are now built by
+        # _build_seed_crowd_rows() from a REAL, correctly-computed
+        # net-flow occupancy walk (entries - exits, clamped at 0) over
+        # each station's actual first calendar day of passenger_flow
+        # rows - not `entries + exits` averaged across the whole
+        # dataset (which was the same throughput-as-occupancy bug as
+        # Bug 1, just in the seed script instead of the simulator).
+        # station_crowd_state is now seeded too, so the live
+        # dashboard/heatmap have real data immediately instead of
+        # being empty until the simulator's first tick.
         flow_df = raw["passenger_flow"].copy()
         flow_df["station_id"] = flow_df["station_id"].astype(str).str.strip()
-        flow_df["passenger_count"] = flow_df["entries"].clip(lower=0) + flow_df["exits"].clip(lower=0)
-        recent_avg = flow_df.groupby("station_id")["passenger_count"].mean()
+        flow_df["timestamp"] = pd.to_datetime(flow_df["timestamp"])
+        flow_df["entries"] = flow_df["entries"].clip(lower=0)
+        flow_df["exits"] = flow_df["exits"].clip(lower=0)
 
-        crowd_rows = []
-        for station_id, db_station in station_rows.items():
-            avg_count = recent_avg.get(station_id, db_station.capacity * 0.2)
-            crowd_rows.append(CrowdLog(
-                station_id=db_station.id,
-                current_count=int(min(avg_count, db_station.capacity)),
-            ))
+        crowd_rows, live_state_rows = _build_seed_crowd_rows(flow_df, station_rows)
         db.add_all(crowd_rows)
+        db.flush()
+        if live_state_rows:
+            db.bulk_insert_mappings(StationCrowdState, live_state_rows)
 
         db.commit()
         print(
             f"Seeded {len(station_rows)} real stations across "
             f"{stations_df['city'].nunique()} cities, {len(line_by_key)} lines, "
             f"{len(train_by_number)} trains (real capacity + commissioned_date "
-            f"from trains.csv), {inserted} real schedule entries, and "
-            f"{len(crowd_rows)} crowd snapshots - EVERY station now has real "
+            f"from trains.csv), {len(timetable_dicts)} canonical timetable slots, "
+            f"{history_inserted} historical schedule records, "
+            f"{len(crowd_rows)} historical crowd_logs rows (real first-day "
+            f"net-occupancy walk per station), and {len(live_state_rows)} live "
+            f"station_crowd_state rows - EVERY station now has real "
             f"passenger_flow.csv coverage (this dataset covers all "
-            f"{len(station_rows)}, not just 6 like the previous one)."
+            f"{len(station_rows)}, not just 6 like the previous one) and a real, "
+            f"non-hardcoded capacity derived from its own crowding_index."
         )
     finally:
         db.close()

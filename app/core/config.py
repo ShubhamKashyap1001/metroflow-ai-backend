@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     APP_NAME: str = "MetroFlow AI"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    DEBUG: bool = False
 
     SQL_ECHO: bool = False
 
@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 25
     DB_POOL_TIMEOUT: int = 10
     DB_POOL_RECYCLE: int = 300
+
+    DB_STATEMENT_TIMEOUT_MS: int = 30_000
+
+
+    WEB_CONCURRENCY: int = 1
+
+    DB_CONNECTION_RESERVE: int = 10
 
     SCHEDULE_CACHE_TTL_SECONDS: int = 30
 
@@ -40,12 +47,78 @@ class Settings(BaseSettings):
     CACHE_TTL_SECONDS: int = 5
 
     ENABLE_SIMULATOR: bool = True
+    # Each tick advances every station one row forward through its own
+    # CSV history (app/simulator/csv_replay_simulator.py) - the dataset
+    # has 18 hourly rows/station/day (5 AM-10 PM), so at the old 10s
+    # default a whole simulated "day" (and the net-occupancy reset at
+    # its boundary) cycled in just 18 x 10s = 3 minutes, making the
+    # Live Passengers KPI swing from empty to peak and back on a
+    # 3-minute clock - real, correct behaviour, just uncomfortably
+    # fast to watch. 60s stretches that same cycle to 18 minutes,
+
+    # SIMULATOR_INTERVAL_SECONDS: int = 20
     SIMULATOR_INTERVAL_SECONDS: int = 10
     SIMULATOR_PASSENGER_POOL_SIZE: int = 40
     SIMULATOR_MAX_CHECKINS_PER_TICK: int = 6
 
+    # --- Phase 2: crowd DB load / retention -------------------------
+    # Live state (station_crowd_state) is upserted EVERY simulator tick
+    # (SIMULATOR_INTERVAL_SECONDS) so the dashboard/heatmap/WebSocket
+    # push stay real-time. Historical rows (crowd_logs) are sampled at
+    # a coarser, independent interval - the dashboard doesn't need
+    # every tick preserved forever, only enough resolution for
+    # trend analytics (inflow/outflow, 24h avg/peak).
+    CROWD_HISTORY_INTERVAL_SECONDS: int = 60
+
+    # Raw crowd_logs rows older than this are rolled up into
+    # crowd_logs_hourly (avg/max/min/sample_count per station-hour)
+    # and then deleted, keeping the high-resolution table small while
+    # preserving long-range analytics in the rollup table.
+    CROWD_LOG_ROLLUP_AFTER_DAYS: int = 2
+
+    # Safety-net hard delete for raw crowd_logs, in case the rollup job
+    # is ever disabled/behind - independent upper bound on raw retention.
+    CROWD_LOG_RETENTION_DAYS: int = 30
+
+    # How long crowd_logs_hourly rollups themselves are kept before
+    # being hard-deleted (long-range trend history).
+    CROWD_LOG_HOURLY_RETENTION_DAYS: int = 400
+
+    ENABLE_CROWD_RETENTION_JOB: bool = True
+    CROWD_RETENTION_INTERVAL_SECONDS: int = 3600
+
+    # Retention/rollup jobs (crowd_logs safety-net + rollup deletes,
+    # crowd_logs_hourly deletes, notification bin deletes) never issue
+    # one unbounded DELETE for the whole backlog - they delete this
+    # many rows per batch/commit instead, so memory use stays bounded
+    # and no single transaction holds locks for the entire backlog's
+    # worth of rows. See app/utils/db_batch.py::batched_delete.
+    RETENTION_BATCH_SIZE: int = 5000
+
+    # Rollup aggregation (raw crowd_logs -> crowd_logs_hourly) is
+    # paginated at this many (station, hour) buckets per page/commit,
+    # for the same reason - a job that's fallen behind can otherwise
+    # aggregate a very large backlog's worth of buckets into memory
+    # (and one transaction) in a single pass.
+    CROWD_ROLLUP_BATCH_SIZE: int = 1000
+
     ENABLE_TRAIN_TRACKING: bool = True
     TRAIN_TRACK_INTERVAL_SECONDS: int = 10
+
+    # --- Notification Bin (Phase 12) ---------------------------------
+    # A "mark all as read" sweep stamps binned_at on every row it
+    # touches (see notification_service.mark_all_read), which pulls it
+    # out of the normal Inbox feed and into the Bin tab. This job then
+    # hard-deletes anything that's been sitting in the Bin longer than
+    # NOTIFICATION_BIN_RETENTION_HOURS - see
+    # app/simulator/notification_bin_retention.py.
+    NOTIFICATION_BIN_RETENTION_HOURS: int = 72
+    ENABLE_NOTIFICATION_BIN_RETENTION_JOB: bool = True
+    # Checked far more often than the retention window itself (unlike
+    # the day-granularity crowd-log retention job) so a binned row
+    # doesn't linger for up to a few hours past its 72h mark before
+    # it's swept.
+    NOTIFICATION_BIN_RETENTION_INTERVAL_SECONDS: int = 300
 
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
@@ -59,6 +132,41 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_FROM_NUMBER: str | None = None
 
+    # Phase 8: alert email/SMS dispatch runs on its OWN small thread
+    # pool instead of FastAPI BackgroundTasks' shared AnyIO worker
+    # pool - see app/core/notification_executor.py. This bounds how
+    # many notification batches can be sending at once; it is
+    # deliberately NOT the same knob as DB_POOL_SIZE/DB_MAX_OVERFLOW
+    # or AnyIO's thread limiter. See docs/notification-delivery.md.
+    NOTIFICATION_DISPATCH_WORKERS: int = 8
+
+    # Phase 10: per-recipient send retry for TRANSIENT provider errors
+    # only (a dropped SMTP connection, a connection-refused/timeout to
+    # Twilio, a 4xx/5xx "try again" response) - see app/core/email.py /
+    # app/core/sms.py's `_is_transient_*` classifiers and
+    # docs/notification-delivery.md. A PERMANENT error (bad address, invalid
+    # phone number, auth failure) is never retried - retrying those
+    # would just waste the whole backoff window before failing anyway.
+    # NOTIFICATION_SEND_MAX_ATTEMPTS counts the first attempt itself,
+    # so the default of 3 means "1 initial try + up to 2 retries".
+    NOTIFICATION_SEND_MAX_ATTEMPTS: int = 3
+    NOTIFICATION_SEND_RETRY_BACKOFF_SECONDS: float = 0.5
+    NOTIFICATION_SEND_RETRY_BACKOFF_CAP_SECONDS: float = 4.0
+
+    # Phase 11: durable dispatch queue (app/models/notification_dispatch_job.py,
+    # app/services/notification_dispatch_queue.py) - a row is written and
+    # committed to Postgres BEFORE the job is handed to
+    # notification_executor's in-memory ThreadPoolExecutor, so a process
+    # restart (deploy, crash, hard kill) never silently drops a
+    # notification that was queued or mid-flight. This caps how many
+    # times a single job is re-attempted across restarts, so a job that
+    # deterministically crashes the process it runs on can't loop
+    # forever - it's marked permanently failed instead. This is
+    # independent of NOTIFICATION_SEND_MAX_ATTEMPTS, which retries a
+    # single transient per-recipient send failure within one already-
+    # running job.
+    NOTIFICATION_DISPATCH_MAX_JOB_ATTEMPTS: int = 5
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"
@@ -66,12 +174,48 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        if self.CORS_ORIGINS == "*":
-            return ["*"]
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        """Explicit allowlist ONLY. CORS_ORIGINS is a comma-separated
+        list of exact origins (scheme+host+port), e.g.
+        "https://app.example.com,https://admin.example.com".
+
+        A literal "*" is never honored, on purpose: this API always
+        sends allow_credentials=True (see the CORSMiddleware setup in
+        app/main.py), and per the CORS spec a wildcard origin can't
+        legally be combined with credentials - browsers reject the
+        literal string "*" there, but a naive implementation that
+        instead reflects back whatever Origin the request actually
+        sent (e.g. via CORSMiddleware's allow_origin_regex=".*") gets
+        around that protection and lets ANY origin make authenticated,
+        credentialed requests. So "*" is dropped here rather than
+        expanded to mean "everything" - a misconfigured CORS_ORIGINS
+        fails safe (no origins allowed) instead of failing open (every
+        origin allowed).
+        """
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        if "*" in origins:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "CORS_ORIGINS contains '*', which is ignored - combined with "
+                "allow_credentials=True that would let any site make "
+                "authenticated requests. List explicit origins instead, e.g. "
+                "CORS_ORIGINS=https://app.example.com,https://admin.example.com"
+            )
+            origins = [o for o in origins if o != "*"]
+        return origins
 
     @property
     def supabase_jwks_url(self) -> str:
         return f"{self.SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+
+    @property
+    def dev_auth_bypass_enabled(self) -> bool:
+        """Whether the mock-auth dev bypass in app/core/security.py is
+        actually honored. Requires BOTH AUTH_DISABLED=True AND
+        DEBUG=True - not just AUTH_DISABLED alone - so a stray/
+        leftover AUTH_DISABLED=true in a production .env can't skip
+        real Supabase JWT verification there, since DEBUG defaults to
+        False (production) unless explicitly turned on."""
+        return self.DEBUG and self.AUTH_DISABLED
 
 settings = Settings()

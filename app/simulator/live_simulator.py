@@ -1,3 +1,16 @@
+"""Milestone 2 - "real-time operational monitoring" without any live
+sensor/CCTV feed.
+
+Previously this just overwrote each station's crowd count with a
+noisy AI prediction every tick. It now simulates real passenger
+traffic instead: a small pool of virtual passenger accounts actually
+check in and check out through `journey_service` - the exact same
+`POST /checkin` / `POST /checkout` code path a real ticket purchase
+uses - so `current_count` moves up on check-in and down on check-out,
+same as it would for a real user, and every tick also produces real
+rows in the `journeys` table (the "Passenger Entry & Exit Records"
+dataset the platform spec calls for).
+"""
 import asyncio
 import random
 import time

@@ -22,6 +22,29 @@ from app.utils.geo import cities_for_state
 from app.websocket.events import STATION_ALERT
 from app.websocket.manager import manager
 
+# Phase 9: both list_alerts (dashboard alert feed) and
+# list_alert_notifications (per-alert email/SMS delivery log) used to
+# run `.all()` with no limit/offset at all - on a long-running deployment
+# either can grow into the tens/hundreds of thousands of rows (every
+# alert ever raised; every recipient x channel row for a single alert
+# sent to the whole active user base), so an unauthenticated-looking but
+# otherwise ordinary GET could pull the entire table into memory and
+# serialize it as one giant JSON response. Same shape as the
+# MAX_BULK_RECOMMENDATION_STATIONS cap in app/api/v1/prediction.py and
+# the admin /logs limit clamp - a default page size plus a hard upper
+# bound, enforced here (not just in the router) so any other caller of
+# these service functions gets the same protection for free.
+DEFAULT_ALERTS_LIMIT = 100
+MAX_ALERTS_LIMIT = 500
+
+DEFAULT_ALERT_NOTIFICATIONS_LIMIT = 200
+MAX_ALERT_NOTIFICATIONS_LIMIT = 1000
+
+def _clamp(value: int, default: int, maximum: int) -> int:
+    if value is None:
+        value = default
+    return min(max(value, 1), maximum)
+
 def _broadcast_alert(db: Session, alert: Alert, resolved: bool) -> None:
     """Pushes the alert to every connected operator immediately over
     /ws/monitor - the sync/thread-safe notify() variant, since this is
@@ -44,7 +67,12 @@ def list_alerts(
     station_id: int | None = None,
     active_only: bool = False,
     state: str | None = None,
+    limit: int = DEFAULT_ALERTS_LIMIT,
+    offset: int = 0,
 ) -> list[Alert]:
+    limit = _clamp(limit, DEFAULT_ALERTS_LIMIT, MAX_ALERTS_LIMIT)
+    offset = max(offset or 0, 0)
+
     query = db.query(Alert)
     if station_id:
         query = query.filter(Alert.station_id == station_id)
@@ -55,7 +83,12 @@ def list_alerts(
         query = query.join(Station, Station.id == Alert.station_id).filter(
             Station.city.in_(cities)
         )
-    return query.order_by(Alert.created_at.desc()).all()
+    return (
+        query.order_by(Alert.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
 def create_alert(db: Session, payload: AlertCreate, created_by: str | None = None) -> Alert:
                                                                      
@@ -85,18 +118,40 @@ def get_alert(db: Session, alert_id: int) -> Alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     return alert
 
-def resolve_alert(db: Session, alert_id: int) -> Alert:
-    alert = get_alert(db, alert_id)
-    if not alert.is_resolved:
-        alert.is_resolved = True
-        alert.resolved_at = datetime.now(timezone.utc)
-        db.add(alert)
-        db.commit()
-        db.refresh(alert)
-        _broadcast_alert(db, alert, resolved=True)
-    return alert
+def resolve_alert(db: Session, alert_id: int) -> tuple[Alert, bool]:
+    """Returns `(alert, just_resolved)`. `just_resolved` is True only
+    on the call that actually flips `is_resolved` False -> True - a
+    repeat call for an already-resolved alert (a retried request after
+    a dropped response, a double-click, a client that times out and
+    resubmits) returns the same alert with `just_resolved=False` and
+    performs no further writes or broadcasts.
 
-def _log_results(db: Session, alert_id: int, channel: NotificationChannel, results: dict[str, str]) -> None:
+    The caller (PATCH /alerts/{id}/resolve) MUST gate its
+    resolution-notification dispatch on `just_resolved`, not on the
+    request merely having `notify_on_resolve=true` - otherwise every
+    repeat/retried call re-sends the resolution email/SMS/bell
+    notification for an alert that was already resolved, which is
+    exactly the "duplicate notifications" bug this guards against. See
+    docs/notification-delivery.md."""
+    alert = get_alert(db, alert_id)
+    if alert.is_resolved:
+        return alert, False
+
+    alert.is_resolved = True
+    alert.resolved_at = datetime.now(timezone.utc)
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    _broadcast_alert(db, alert, resolved=True)
+    return alert, True
+
+def _log_results(
+    db: Session,
+    alert_id: int,
+    channel: NotificationChannel,
+    results: dict[str, str],
+    station_city: str | None = None,
+) -> None:
     for recipient, outcome in results.items():
         is_sent = outcome == "sent"
         db.add(
@@ -114,15 +169,13 @@ def _log_results(db: Session, alert_id: int, channel: NotificationChannel, resul
     if channel == NotificationChannel.EMAIL:
         sent_count = sum(1 for outcome in results.values() if outcome == "sent")
         if sent_count:
-            alert = db.get(Alert, alert_id)
-            station = db.get(Station, alert.station_id) if alert else None
             notification_service.create_notification(
                 db,
                 source=NotificationSource.EMAIL,
                 title="Email notifications sent",
                 message=f"Email notification sent to {sent_count} recipient(s) for alert #{alert_id}.",
                 related_alert_id=alert_id,
-                state=station.city if station else None,
+                state=station_city,
             )
 
 def _dispatch(
@@ -132,25 +185,41 @@ def _dispatch(
     notify_sms: bool,
     resolved: bool,
 ) -> None:
+    """Runs in a FastAPI BackgroundTask (its own thread, its own DB
+    session - never the request's).
 
+    Phase 6 fix: this used to hold ONE db session/connection open for
+    its entire body, including the two blocking network calls
+    (send_alert_emails / send_alert_sms) - a real "long transaction"
+    bug: a slow SMTP/Twilio round trip (or many recipients) held a
+    pooled connection idle-but-checked-out for the whole time, making
+    it unavailable to every other request. Restructured into three
+    short, independent steps so a DB connection is only ever held for
+    the fast read/write portions - see docs/database-sessions-and-connection-pooling.md."""
     if not notify_email and not notify_sms:
         return
 
-    db = SessionLocal()
+    # Step 1: read everything this dispatch needs, as plain values (not
+    # ORM objects), then close the session immediately - nothing below
+    # this block touches `db1`.
+    db1 = SessionLocal()
     try:
-        alert = db.get(Alert, alert_id)
+        alert = db1.get(Alert, alert_id)
         if not alert:
             return
 
-        station = db.get(Station, alert.station_id)
+        station = db1.get(Station, alert.station_id)
         station_name = station.station_name if station else f"Station #{alert.station_id}"
-
+        station_city = station.city if station else None
         available_until = (
             alert.available_until.isoformat() if alert.available_until else None
         )
+        alert_type = alert.alert_type.value
+        alert_message = alert.message
+        alert_created_at = alert.created_at.isoformat()
 
         active_users = (
-            db.query(UserProfile)
+            db1.query(UserProfile)
             .filter(
                 UserProfile.is_active.is_(True),
                 or_(
@@ -160,42 +229,56 @@ def _dispatch(
             )
             .all()
         )
+        creator = db1.get(UserProfile, created_by_id) if created_by_id else None
 
-        creator = db.get(UserProfile, created_by_id) if created_by_id else None
-
-        if notify_email:
-            emails = {u.email for u in active_users if u.email}
-            if creator and creator.email:
-                emails.add(creator.email)
-            if emails:
-                results = send_alert_emails(
-                    recipients=list(emails),
-                    station_name=station_name,
-                    alert_type=alert.alert_type.value,
-                    message=alert.message,
-                    created_at=alert.created_at.isoformat(),
-                    available_until=available_until,
-                    resolved=resolved,
-                )
-                _log_results(db, alert.id, NotificationChannel.EMAIL, results)
-
-        if notify_sms:
-                                                                     
-            phones = {u.phone for u in active_users if u.phone}
-            if creator and creator.phone:
-                phones.add(creator.phone)
-            if phones:
-                sms_results = send_alert_sms(
-                    recipients=list(phones),
-                    station_name=station_name,
-                    alert_type=alert.alert_type.value,
-                    message=alert.message,
-                    available_until=available_until,
-                    resolved=resolved,
-                )
-                _log_results(db, alert.id, NotificationChannel.SMS, sms_results)
+        emails = {u.email for u in active_users if u.email}
+        if creator and creator.email:
+            emails.add(creator.email)
+        phones = {u.phone for u in active_users if u.phone}
+        if creator and creator.phone:
+            phones.add(creator.phone)
     finally:
-        db.close()
+        db1.close()
+
+    # Step 2: the actual slow part - blocking SMTP/Twilio network calls,
+    # deliberately done with NO db session open at all.
+    email_results = None
+    sms_results = None
+    if notify_email and emails:
+        email_results = send_alert_emails(
+            recipients=list(emails),
+            station_name=station_name,
+            alert_type=alert_type,
+            message=alert_message,
+            created_at=alert_created_at,
+            available_until=available_until,
+            resolved=resolved,
+        )
+    if notify_sms and phones:
+        sms_results = send_alert_sms(
+            recipients=list(phones),
+            station_name=station_name,
+            alert_type=alert_type,
+            message=alert_message,
+            available_until=available_until,
+            resolved=resolved,
+        )
+
+    # Step 3: a second short session just to log the outcomes - opened
+    # only now that the slow network calls are already done.
+    if email_results is None and sms_results is None:
+        return
+    db2 = SessionLocal()
+    try:
+        if email_results is not None:
+            _log_results(db2, alert_id, NotificationChannel.EMAIL, email_results, station_city=station_city)
+        if sms_results is not None:
+            _log_results(db2, alert_id, NotificationChannel.SMS, sms_results, station_city=station_city)
+    except Exception:
+        db2.rollback()
+        raise
+    finally:
+        db2.close()
 
 def dispatch_alert_notifications(
     alert_id: int,
@@ -225,10 +308,20 @@ def dispatch_alert_resolution_notifications(alert_id: int, resolved_by_id: str |
 
     _dispatch(alert_id, resolved_by_id, notify_email, notify_sms, resolved=True)
 
-def list_alert_notifications(db: Session, alert_id: int) -> list[NotificationLog]:
+def list_alert_notifications(
+    db: Session,
+    alert_id: int,
+    limit: int = DEFAULT_ALERT_NOTIFICATIONS_LIMIT,
+    offset: int = 0,
+) -> list[NotificationLog]:
+    limit = _clamp(limit, DEFAULT_ALERT_NOTIFICATIONS_LIMIT, MAX_ALERT_NOTIFICATIONS_LIMIT)
+    offset = max(offset or 0, 0)
+
     return (
         db.query(NotificationLog)
         .filter(NotificationLog.alert_id == alert_id)
         .order_by(NotificationLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )

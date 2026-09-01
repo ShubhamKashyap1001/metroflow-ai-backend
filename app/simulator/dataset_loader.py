@@ -1,3 +1,5 @@
+"""Loads the ai_engine synthetic (or, later, real) ridership dataset
+for use by the simulator and any ad-hoc analysis/notebooks."""
 import os
 
 import pandas as pd

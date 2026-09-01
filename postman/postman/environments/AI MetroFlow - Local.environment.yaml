@@ -3,12 +3,12 @@ values:
   - key: base_url
     value: 'http://127.0.0.1:8000'
   - key: supabase_url
-    value: 'https://dfmdlfxcxvsbzouikwgo.supabase.co'
+    value: 'https://YOUR-PROJECT-REF.supabase.co'
   - key: supabase_anon_key
-    value: sb_publishable_7VvhXHDkz1yhVz_dSC43iQ_mP-B6Mpf
+    value: 'YOUR_SUPABASE_ANON_KEY'
   - key: supabase_email
-    value: shubham120104@gmail.com
+    value: 'you@example.com'
   - key: supabase_password
-    value: Shubham@2004
+    value: 'YOUR_LOCAL_TEST_PASSWORD'
   - key: access_token
     value: ''

@@ -117,9 +117,12 @@ def build_delay_dataset() -> pd.DataFrame:
     df["passenger_count"] = df["passenger_count"].fillna(df["station_id"].map(station_avg))
     df["passenger_count"] = df["passenger_count"].fillna(crowd_table["passenger_count"].mean())
 
+    weather_code = {"Sunny": 0, "Overcast": 1, "Rainy": 2, "Stormy": 3}
+    df["weather_code"] = df["weather"].map(weather_code).fillna(0).astype(int)
+
     return df[[
         "station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
-        "passenger_count", "capacity_passengers", "train_age_days", "delay_minutes",
+        "passenger_count", "capacity_passengers", "train_age_days", "weather_code", "delay_minutes",
     ]]
 
 
