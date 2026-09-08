@@ -1,20 +1,3 @@
-"""Tests for `app.database.database.check_pool_capacity` (Phase 17E) -
-the check that verifies (DB_POOL_SIZE + DB_MAX_OVERFLOW) x
-WEB_CONCURRENCY cannot exceed Postgres's real max_connections.
-
-These test the pure arithmetic/raise-or-not function directly, not
-the module-level `_verify_pool_capacity_or_raise()` that runs it
-against a real Postgres connection at import time - that part already
-ran (against whatever `DATABASE_URL` points at) the moment
-`app.database.database` was first imported by anything in this
-process, same as every other test file in this suite. Testing the
-pure function in isolation means this file needs neither a real
-Postgres nor psycopg2 to be meaningful, and can exercise
-configurations (e.g. a huge WEB_CONCURRENCY) that would be impractical
-or undesirable to actually boot the app with.
-
-Run with:  pytest tests/test_db_pool_capacity.py -v
-"""
 import pytest
 
 from app.database.database import check_pool_capacity

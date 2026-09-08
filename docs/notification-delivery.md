@@ -137,17 +137,22 @@ recovery tells "just queued, try it" apart from "we've already tried
 this repeatedly and it keeps dying".
 
 Recovery re-runs the whole dispatch from scratch rather than resuming
-mid-recipient-list, so a job that died partway through may send some
-recipients a duplicate email/SMS - a deliberate "possibly sent twice"
-trade-off over "silently never sent", without restructuring the
-per-recipient send/log logic covered above. This is orthogonal to the
-transient-send-failure retry described above: that retries one
-recipient's send within a single already-running job; this is about
-the job itself surviving the process it's running in going away.
+mid-recipient-list, but each `NotificationLog` row now records the
+`job_id` it was sent for, and `alert_service._dispatch` checks that
+before ever calling out to the email/SMS provider: a recipient who
+already has a SENT log row for THIS job/channel is skipped, so a job
+resumed after a crash cannot send that recipient a duplicate
+email/SMS. Recipients never reached, or that failed, are not skipped -
+retries are unaffected. This is orthogonal to the transient-send-
+failure retry described above: that retries one recipient's send
+within a single already-running job; this is about the job itself
+surviving the process it's running in going away.
 
 New deployment: `python -m app.database.migrate_notification_dispatch_jobs`
 creates the `notification_dispatch_jobs` table on an existing database
-(a fresh `init_db.py` run picks it up automatically).
+(a fresh `init_db.py` run picks it up automatically), and
+`python -m app.database.migrate_notification_log_job_id` adds the
+`notification_logs.job_id` column used by the idempotency check above.
 
 ## Tests
 

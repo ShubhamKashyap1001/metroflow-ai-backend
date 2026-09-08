@@ -14,10 +14,12 @@ pip install -r requirements.txt
 
 
 ```bash
-python -m app.database.init_db     # create tables
+python -m app.database.init_db     # create tables (runs `alembic upgrade head`)
 python -m app.database.seed        # demo stations/trains/schedules (no login created)
 
-        # add --reset to replace an existing synthetic seed
+alembic upgrade head
+
+python -m app.database.seed_real_data        # add --reset to replace an existing synthetic seed
 
 # Sign up through the frontend (Supabase), then make yourself admin:
 python -m app.database.set_user_role <your-email> admin

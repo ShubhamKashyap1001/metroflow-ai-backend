@@ -1,32 +1,4 @@
-"""Remaining N+1 / slow-DB-query fixes.
 
-Same style/reason as tests/test_pagination_limits.py and
-tests/test_prediction_service.py: pure unit tests against the service/
-model layer via MagicMock/patch, since this sandbox has no network
-access to install fastapi/sqlalchemy/redis for a real TestClient +
-Postgres run. Each test simulates "many items" (many stations in one
-smart_recommendations_bulk call, many upcoming trains) and asserts the
-underlying query count/shape actually collapsed to O(1) per request,
-not just that the function still returns the right answer.
-
-Two independent N+1 patterns fixed here:
-
-1. app/ai_engine/prediction/delay_predictor.py: every predict_delay()
-   call made without a specific train_id (which is every call
-   prediction_service.smart_recommendations_bulk makes, once per
-   station in its loop) used to run TWO separate full-table scans of
-   `trains` (one for the fleet-average capacity, one for the fleet-
-   average age) to compute the exact same two numbers over and over.
-   Fixed with a single combined query, cached briefly (Redis + a short
-   process-local fallback) and invalidated on train create/update.
-
-2. app/services/schedule_service.py::get_upcoming_schedules: the
-   `timetable_rows` query that resolves each train's "next stop" had
-   no eager-load option, so `next_stop.station` (read once per
-   upcoming train, to get the "To" station name) triggered a fresh
-   lazy-loaded SELECT per row instead of joining it into the single
-   query that already eager-loads the "from" station a few lines up.
-"""
 from unittest.mock import MagicMock, call, patch
 
 from app.ai_engine.prediction import delay_predictor

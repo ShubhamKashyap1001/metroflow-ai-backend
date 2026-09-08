@@ -30,12 +30,14 @@ it finished - and resubmits it, up to
 it keeps dying, stop".
 
 This intentionally re-runs the whole job from scratch rather than
-resuming mid-recipient-list: `alert_service._dispatch` already treats
-one call as the unit of work (one `NotificationLog` row per
-(alert, channel, recipient) appended per call), so recovering a job
-that died partway through means some recipients may get a duplicate
-send. That's the deliberate trade-off this fix makes - "possibly sent
-twice" instead of "silently never sent" - without restructuring the
+resuming mid-recipient-list, but stays duplicate-safe by having every
+`NotificationLog` row record which job produced it (`job_id`) and
+having `alert_service._dispatch` skip any recipient that already has a
+SENT log row for THIS job/channel before it ever calls out to the
+email/SMS provider again. A job resumed after a crash therefore can
+retry recipients it never reached or that failed, without re-sending
+to anyone it already reached - "silently never sent" is fixed without
+reintroducing "sent twice", and without restructuring the
 per-recipient send/log logic itself.
 """
 from datetime import datetime

@@ -1,12 +1,3 @@
-"""India state <-> metro city mapping.
-
-MetroFlow's seeded station data (see app/database/seed_real_data.py)
-is real, city-by-city data across 12 Indian metro cities. There's no
-`state` column on any table - state selection in the UI is a filter
-over the cities that already exist, resolved here so every service
-(stations, trains, crowd, schedules, alerts, analytics) filters the
-same way.
-"""
 
 STATE_CITY_MAP: dict[str, list[str]] = {
     "Delhi": ["Delhi"],

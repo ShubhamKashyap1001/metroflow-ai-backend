@@ -1,23 +1,3 @@
-"""Shared helper for retention/rollup background jobs: delete matching
-rows in bounded batches instead of one unbounded DELETE.
-
-Postgres has no `DELETE ... LIMIT`, so batching a delete means
-repeatedly deleting the primary keys matched by a bounded subquery
-until none are left, committing after each batch. Two things this
-buys over a single `query.filter(...).delete()`:
-
-  - Memory: each pass only ever pulls `batch_size` primary keys into
-    Python, never the full set of ids that match the retention
-    cutoff - a job that's fallen behind (or a large deployment) can
-    have a backlog of hundreds of thousands of stale rows and this
-    still only ever holds `batch_size` ints in memory at a time.
-  - Transaction length: each batch commits (and releases its row
-    locks) before the next one starts, instead of one DELETE holding
-    locks against every matching row for however long it takes to
-    remove the *entire* backlog - other writers to the same table
-    (e.g. the simulator's own INSERTs) don't queue up behind a single
-    long-running retention transaction.
-"""
 from __future__ import annotations
 
 from sqlalchemy.orm import Session

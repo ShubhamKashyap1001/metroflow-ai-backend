@@ -85,12 +85,16 @@ def run_job(job_id: int) -> None:
     untouched. Then DONE or FAILED once the underlying dispatch call
     returns or raises.
 
-    Deliberately re-runs the full dispatch (dispatch_alert_notifications
-    / dispatch_alert_resolution_notifications) rather than resuming
-    mid-recipient-list - see the module docstring on
-    NotificationDispatchJob for why that's an acceptable "possibly
-    sent twice" trade-off instead of restructuring the per-recipient
-    send/log logic to be resumable."""
+    Re-runs the full dispatch (dispatch_alert_notifications /
+    dispatch_alert_resolution_notifications) rather than resuming
+    mid-recipient-list, but passes this job's own id through as
+    `job_id` so per-recipient idempotency (see
+    alert_service._dispatch) can skip anyone this exact job already
+    successfully sent to on an earlier, crashed attempt - a resumed
+    run can retry recipients that were never reached or that failed,
+    without re-sending to ones that already got the email/SMS. See the
+    module docstring on NotificationDispatchJob for the full
+    "why"."""
     db = SessionLocal()
     try:
         job = db.get(NotificationDispatchJob, job_id)
@@ -115,9 +119,13 @@ def run_job(job_id: int) -> None:
 
     try:
         if kind == NotificationDispatchKind.ALERT_CREATED:
-            alert_service.dispatch_alert_notifications(alert_id, actor_id, notify_email, notify_sms)
+            alert_service.dispatch_alert_notifications(
+                alert_id, actor_id, notify_email, notify_sms, job_id=job_id
+            )
         else:
-            alert_service.dispatch_alert_resolution_notifications(alert_id, actor_id)
+            alert_service.dispatch_alert_resolution_notifications(
+                alert_id, actor_id, job_id=job_id
+            )
     except Exception as exc:
         _mark(job_id, NotificationDispatchStatus.FAILED, error=str(exc)[:500])
         raise

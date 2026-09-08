@@ -19,12 +19,14 @@ instead of surfacing a 500.
 """
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 
 import joblib
 import numpy as np
 import pandas as pd
+
+from app.utils.timezone import to_business_time
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +99,18 @@ def predict_crowd(
     trained candidate's prediction (currently random_forest and
     xgboost) so callers that want to show both side by side can, without
     the winner-takes-all fallback logic needing to change."""
-    dt = target_datetime or datetime.utcnow()
-    hour = dt.hour
-    day_of_week = dt.weekday()
+    dt = target_datetime or datetime.now(timezone.utc)
+    # BUGFIX (naive datetime / timezone handling): `hour`/`day_of_week`
+    # used to be read straight off `dt`, which is UTC-aware for every
+    # "now" caller in this codebase - but "peak hour" (8-11am/5-8pm)
+    # and "weekend" are business-local concepts for the metro network
+    # being predicted, not UTC ones. `dt` itself (returned below as
+    # `target_datetime`) is left untouched - only the feature
+    # extraction is resolved against the business timezone. See
+    # app/utils/timezone.py.
+    local_dt = to_business_time(dt)
+    hour = local_dt.hour
+    day_of_week = local_dt.weekday()
     is_weekend = 1 if day_of_week in (5, 6) else 0
     is_peak_hour = 1 if (8 <= hour <= 11 or 17 <= hour <= 20) else 0
 

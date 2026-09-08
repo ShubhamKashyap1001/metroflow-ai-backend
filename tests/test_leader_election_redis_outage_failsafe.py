@@ -1,26 +1,3 @@
-"""Regression tests: `app/simulator/leader_election.py` must
-be fail-SAFE (keep the simulator running, same-host-coordinated) once
-a real, mid-flight Redis outage has lasted long enough that any
-pre-outage lease is guaranteed expired - not fail-STOP forever, which
-is what it did before this fix.
-
-Bug: once `_redis_ever_reachable` latched True, `_election_tick()`
-never again took the local-lock fallback branch, no matter how long
-Redis stayed down. A Redis crash/restart-that-never-comes-back after
-the app had been running fine meant every process stepped down and
-NONE of them ever ran the crowd simulator / train tracker / retention
-job again - a full, indefinite outage of the whole simulator fleet
-caused by a single dependency going down, which is the opposite of
-"fail-safe".
-
-Fix: track how long Redis has been continuously unreachable
-(`_redis_down_since`). Once that exceeds one full lease window
-(`lease_seconds` - the same TTL any real Redis-held lease would have
-been bound by), treat it exactly like "Redis never configured" and
-fall back to the same-host local-lock coordinator. Before that grace
-window elapses, it still fails CLOSED (steps down) exactly as before,
-so a lease genuinely still held elsewhere can't be raced.
-"""
 import asyncio
 from unittest.mock import patch
 

@@ -1,19 +1,3 @@
-"""Regression tests for the crowd data-correctness fixes.
-See docs/crowd-data-correctness.md for the full writeup.
-
-Every fixture row below is a REAL record copied verbatim (timestamp,
-entries, exits, crowding_index, crowding_label) from the shipped
-`datasets/passenger_flow.csv.gz` - specifically station
-STN-AMD-RL-01's first real calendar day (2026-01-01) - so these tests
-exercise the fixed formulas against data the exact same shape/scale as
-production, not synthetic numbers.
-
-The functions tested here (`_current_count_from_row`,
-`_derive_station_capacities`, `CrowdLevel.from_ratio`,
-`CrowdLogCreate`) are all pure/DB-free, so they run without a live
-Postgres/Redis/ML-model dependency (see docs/crowd-data-correctness.md
-for the pytest output).
-"""
 import pandas as pd
 import pytest
 from pydantic import ValidationError

@@ -1,30 +1,4 @@
-"""Retention/rollup background jobs (app/simulator/retention.py,
-app/simulator/notification_bin_retention.py) used to do their DB work
-in two ways that don't scale with a large backlog:
 
-  1. `crowd_logs` -> `crowd_logs_hourly` rollup ran its aggregate
-     SELECT with a bare `.all()`, pulling every (station, hour) bucket
-     the whole backlog produced into one Python list before looping
-     over it issuing one INSERT per bucket.
-  2. All three hard-delete steps (raw crowd_logs safety net,
-     crowd_logs_hourly, notification bin) issued one unbounded
-     `query.filter(...).delete()` for however many rows matched the
-     retention cutoff, in one transaction.
-
-Both are now bounded: the rollup aggregate is paginated
-(CROWD_ROLLUP_BATCH_SIZE buckets/page, one multi-row upsert + commit
-per page) and every hard-delete goes through
-app/utils/db_batch.py::batched_delete (RETENTION_BATCH_SIZE rows/
-batch, one commit per batch).
-
-Same style/reason as tests/test_pagination_limits.py: pure unit tests
-against the service layer via MagicMock/patch, since this sandbox has
-no network access to install a real Postgres for a live-DB run. "Large
-dataset" is simulated by having the mocked query return however many
-rows a multi-batch backlog implies, then asserting the batching
-actually happened (bounded page/batch sizes, one commit per page/
-batch) rather than just that the function returned a total.
-"""
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -37,7 +11,6 @@ import app.simulator.notification_bin_retention as notification_bin_retention
 import app.simulator.retention as retention
 
 
-# --- app/utils/db_batch.py::batched_delete ----------------------------------
 
 def test_batched_delete_removes_a_large_backlog_in_bounded_batches():
     """A 12,050-row backlog with batch_size=5000 must come out as 3
@@ -116,7 +89,6 @@ def test_batched_delete_nothing_matches_does_nothing():
     db.commit.assert_not_called()
 
 
-# --- app/simulator/retention.py::_rollup_and_delete -------------------------
 
 def _fake_bucket_row(i):
     return SimpleNamespace(
@@ -204,7 +176,6 @@ def test_rollup_no_backlog_upserts_nothing():
     db.commit.assert_not_called()
 
 
-# --- the two hard-delete safety nets ----------------------------------------
 
 def test_hard_delete_stale_raw_goes_through_the_batching_helper():
     db = MagicMock()
@@ -231,8 +202,6 @@ def test_hard_delete_stale_hourly_goes_through_the_batching_helper():
     assert args[2] is retention.CrowdLogHourly.id
     assert mock_bd.call_args.kwargs["batch_size"] == retention.settings.RETENTION_BATCH_SIZE
 
-
-# --- app/simulator/notification_bin_retention.py ----------------------------
 
 def test_notification_bin_retention_goes_through_the_batching_helper():
     db = MagicMock()

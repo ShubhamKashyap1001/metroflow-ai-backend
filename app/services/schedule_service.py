@@ -1,6 +1,6 @@
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Callable
 
 from fastapi import HTTPException
@@ -24,6 +24,7 @@ from app.schemas.train_schedule import (
 from app.services import notification_service
 from app.services.train_tracking import invalidate_route_cache
 from app.utils.geo import cities_for_state
+from app.utils.timezone import business_now, business_today
 from app.websocket.events import DELAY_ALERT, SCHEDULE_UPDATE
 from app.websocket.manager import manager
 
@@ -149,8 +150,20 @@ def _current_day_type() -> DayType:
     """Saturday/Sunday -> WEEKEND, else WEEKDAY. Schedules only carry a
     time-of-day (no date), so "today" is resolved this way rather than
     against a specific calendar date - matches how list_schedules'
-    day_type filter is meant to be used."""
-    return DayType.WEEKEND if datetime.now().weekday() >= 5 else DayType.WEEKDAY
+    day_type filter is meant to be used.
+
+    BUGFIX (naive datetime / timezone handling): this used to resolve
+    "today" against the raw UTC weekday (`datetime.now(timezone.utc)`)
+    on the theory that UTC was at least consistent with the rest of
+    the app's timestamp policy. But train_schedule arrival/departure
+    times are the metro network's own local wall-clock times (see
+    app/utils/timezone.py), not UTC - so a train_schedules row that's
+    WEEKDAY in local time could get compared against a UTC "today"
+    that's already rolled over into Saturday (or vice versa) for
+    several hours around each local midnight. Resolved against the
+    app's configured business timezone instead, so this always agrees
+    with what day it actually is for the network being scheduled."""
+    return DayType.WEEKEND if business_now().weekday() >= 5 else DayType.WEEKDAY
 
 def _station_line_info(station: Station | None) -> tuple[str | None, str | None]:
     """(line_name, line_color) for a station, resolved the same way as
@@ -194,7 +207,11 @@ def get_upcoming_schedules(
         # as the rest of this module.
         limit = _clamp(limit, 20, MAX_SCHEDULE_LIST_LIMIT)
         day_type = _current_day_type()
-        now_t = datetime.now().time()
+        # BUGFIX (naive datetime / timezone handling): compared against
+        # a UTC time-of-day before, which - like _current_day_type()
+        # above - is the wrong clock for schedule rows keyed on local
+        # departure_time. See app/utils/timezone.py.
+        now_t = business_now().time()
 
         # PERF FIX (query-analysis pass, see docs/query-performance-and-indexing.md):
         # this used to unconditionally `.join(Station, ...)` just to be
@@ -473,7 +490,13 @@ def handle_delay(db: Session, schedule_id: int, payload: DelayUpdate) -> TrainSc
     schedule.status = ScheduleStatus.DELAYED if payload.delay_minutes > 0 else ScheduleStatus.ON_TIME
 
     if payload.delay_minutes > 0:
-        base = datetime.combine(datetime.today(), schedule.arrival_time)
+        # BUGFIX (naive datetime / timezone handling): `datetime.today()`
+        # anchored this on the naive server-local date - only the
+        # resulting `.time()` is kept below, but the date component
+        # should still come from the same business-timezone clock as
+        # every other date/schedule calculation in this module rather
+        # than an unrelated, naive one. See app/utils/timezone.py.
+        base = datetime.combine(business_today(), schedule.arrival_time)
         delayed = base.replace(
             minute=(base.minute + payload.delay_minutes) % 60,
             hour=base.hour + (base.minute + payload.delay_minutes) // 60,

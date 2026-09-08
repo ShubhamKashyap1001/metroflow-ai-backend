@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -169,7 +169,7 @@ async def track_tick(db: Session, interval_seconds: int) -> list[dict]:
         # replay_tick() for why (same reasoning applies to this loop).
         await manager.broadcast_everywhere(
             TRAIN_POSITION,
-            {"updates": updates, "timestamp": datetime.utcnow().isoformat()},
+            {"updates": updates, "timestamp": datetime.now(timezone.utc).isoformat()},
         )
     return updates
 

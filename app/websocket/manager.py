@@ -510,8 +510,19 @@ class ConnectionManager:
                 # special handling needed here beyond not raising.
                 return
 
-    async def connect(self, websocket: WebSocket, user_id: str | None = None) -> None:
-        await websocket.accept()
+    async def connect(
+        self,
+        websocket: WebSocket,
+        user_id: str | None = None,
+        subprotocol: str | None = None,
+    ) -> None:
+        # `subprotocol` is the single value (out of whatever the client
+        # offered via Sec-WebSocket-Protocol) we're accepting the
+        # handshake with - required by the WS spec whenever the client
+        # sent that header, or most browsers abort the connection. See
+        # /ws/monitor in main.py, which uses this to carry the auth
+        # token off the URL and onto that header instead.
+        await websocket.accept(subprotocol=subprotocol)
         self.active_connections.append(websocket)
         self._connection_users[websocket] = user_id
         self._last_seen[websocket] = time.monotonic()

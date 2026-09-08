@@ -34,6 +34,8 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 
+from app.utils.timezone import business_today
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
@@ -91,7 +93,14 @@ def _train_info_map() -> pd.DataFrame:
     trains["train_id"] = trains["train_id"].astype(str).str.strip()
     trains["commissioned_date"] = pd.to_datetime(trains["commissioned_date"])
     trains = trains.reset_index(drop=True)
-    today = pd.Timestamp(pd.Timestamp.now().date())
+    # BUGFIX (naive datetime / timezone handling): pd.Timestamp.now()
+    # reads the naive server-local clock, which can disagree with the
+    # app's configured business timezone (and drifts train_age_days by
+    # a day right around midnight depending on what timezone the
+    # process happens to run in) - same class of bug already fixed in
+    # delay_predictor.py's _real_train_age_days for this identical
+    # feature. See app/utils/timezone.py.
+    today = pd.Timestamp(business_today())
     trains["train_age_days"] = (today - trains["commissioned_date"]).dt.days.astype(float)
     return trains[["train_id", "capacity_passengers", "train_age_days"]]
 

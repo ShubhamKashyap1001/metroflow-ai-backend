@@ -79,6 +79,7 @@ without touching any of the limit *values* above (no limit was raised
 or loosened to fix this).
 """
 import logging
+import time
 
 import redis
 from slowapi import Limiter
@@ -153,7 +154,57 @@ def _build_limiter() -> Limiter:
         # probe above) - see this module's docstring. A no-op when
         # storage_uri is None (in-memory storage ignores it).
         storage_options=_STORAGE_OPTIONS,
+        # Deliberately left at slowapi's default (False) here, NOT
+        # flipped on: turning it on also switches on slowapi's
+        # SUCCESS-path header injection inside every `@limiter.limit`
+        # decorator (app/api/v1/authentication.py, prediction.py,
+        # analytics.py, etc.), which calls `_inject_headers` on
+        # `kwargs.get("response")` for any endpoint that returns a
+        # plain model/dict instead of a Response object - crashing
+        # with a 500 on every successful decorated request, since none
+        # of these endpoints declare a `response: Response` parameter.
+        # The missing-Retry-After problem this was meant to fix is
+        # solved instead, without that blast radius, by
+        # `_rate_limit_exceeded_handler_with_retry_after` below, which
+        # only touches the already-429 response path.
     )
+
+
+def _rate_limit_exceeded_handler_with_retry_after(request, exc):
+    """Same JSON body as slowapi's own default handler
+    (`slowapi.extension._rate_limit_exceeded_handler`), plus a
+    `Retry-After` header so a well-behaved client knows how long to
+    back off - which the default handler only adds when the Limiter
+    was constructed with `headers_enabled=True`, and that flag can't
+    be turned on here (see the comment above). Computes the same
+    window-stats-based reset time slowapi's own header injection uses,
+    but applies it unconditionally to this 429 response only - it
+    never touches a successful (200) response, so it carries none of
+    that flag's success-path risk.
+    """
+    from starlette.responses import JSONResponse
+
+    response = JSONResponse(
+        {"error": f"Rate limit exceeded: {exc.detail}"}, status_code=429
+    )
+    current_limit = getattr(request.state, "view_rate_limit", None)
+    if current_limit is not None:
+        try:
+            window_stats = limiter.limiter.get_window_stats(
+                current_limit[0], *current_limit[1]
+            )
+            reset_in = 1 + window_stats[0]
+            response.headers["Retry-After"] = str(max(int(reset_in - time.time()), 0))
+        except Exception:
+            # Never let a headers-computation problem turn a 429 into
+            # an unhandled 500 - the plain JSON body above is still a
+            # perfectly valid rate-limit response without it.
+            logger.warning(
+                "[rate_limit] failed to compute Retry-After for a 429 "
+                "response - returning the 429 without it.",
+                exc_info=True,
+            )
+    return response
 
 
 limiter = _build_limiter()

@@ -1,6 +1,6 @@
 """Health check - used by Docker/cloud deployment liveness & readiness probes."""
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter
 from sqlalchemy import text
@@ -44,6 +44,6 @@ def health_check():
                                                                  
         "redis": cache.redis_status(),
         "websocket_connections": len(manager.active_connections),
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
     }
 

@@ -1,13 +1,4 @@
-"""Rate-limiting tests.
 
-Requires a reachable Redis at settings.REDIS_URL (same one the app
-uses) and a reachable DATABASE_URL, same as the rest of the suite -
-these are integration tests, not unit tests, because the whole point
-is to exercise the real shared-storage behavior across process
-boundaries.
-
-Run with:  pytest tests/test_rate_limiting.py -v
-"""
 import uuid
 
 import pytest

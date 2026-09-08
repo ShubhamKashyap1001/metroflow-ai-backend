@@ -38,12 +38,32 @@ class NotificationLog(TimestampMixin, Base):
     # ANALYZE before/after - see docs/query-performance-and-indexing.md).
     __table_args__ = (
         Index("ix_notification_logs_alert_id_created_at", "alert_id", "created_at"),
+        # Fast "has this job already sent to this recipient on this
+        # channel?" lookup - the idempotency check a resumed/duplicated
+        # job run does before ever calling out to the email/SMS
+        # provider again.
+        Index("ix_notification_logs_job_channel_recipient", "job_id", "channel", "recipient"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
     alert_id: Mapped[int] = mapped_column(
         ForeignKey("alerts.id")
+    )
+
+    # BUGFIX (duplicate dispatch on crash-recovery): which
+    # notification_dispatch_jobs row this send was performed for -
+    # nullable because rows logged before this fix (and any future
+    # direct/non-queue caller) won't have one. This is what lets a
+    # resumed/duplicated run of the SAME job (see
+    # app/services/notification_dispatch_queue.py) tell "I already
+    # sent to this recipient on this attempt-chain" apart from
+    # "this is a genuinely new dispatch for this alert" - two
+    # legitimate dispatches for the same alert (e.g. raised, then
+    # resolved) get different job_ids, so they are never confused
+    # with each other.
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_dispatch_jobs.id"), nullable=True
     )
 
     channel: Mapped[NotificationChannel] = mapped_column(

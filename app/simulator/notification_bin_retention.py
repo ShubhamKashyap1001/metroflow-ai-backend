@@ -1,26 +1,3 @@
-"""Notification Bin retention background job.
-
-A "mark all as read" sweep (notification_service.mark_all_read) stamps
-`binned_at` on every row it touches, which immediately pulls those
-rows out of the Inbox feed (list_notifications) and into the Bin tab
-(list_binned_notifications) - see the Bin section of
-app/models/notification.py's module docstring for the full picture.
-
-This module is the other half of that promise: every
-NOTIFICATION_BIN_RETENTION_INTERVAL_SECONDS (default 5 min), hard-
-delete any notification row whose `binned_at` is older than
-NOTIFICATION_BIN_RETENTION_HOURS (default 72h). Unlike the 7-day Inbox
-retention (enforced purely at read time, see notification_service.py's
-module docstring), the Bin's 72h promise is enforced by actually
-deleting the row - once something's been sitting in the Bin for a day,
-it's gone for good, not just hidden.
-
-Same run_forever/scheduler + LeaderElection pattern already used for
-the crowd/train simulators and the crowd_logs retention job (see
-app/simulator/retention.py and app/simulator/scheduler.py), gated by
-ENABLE_NOTIFICATION_BIN_RETENTION_JOB so it can be turned off the same
-way.
-"""
 from __future__ import annotations
 
 import asyncio
