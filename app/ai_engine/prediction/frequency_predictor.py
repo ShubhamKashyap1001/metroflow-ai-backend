@@ -4,11 +4,13 @@ adjustment" workflow with a data-driven suggestion.
 """
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 
 import joblib
 import pandas as pd
+
+from app.utils.timezone import to_business_time
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +32,16 @@ def _load_model():
         return None
 
 def recommend_frequency(station_id: int, target_datetime: datetime | None = None) -> dict:
-    dt = target_datetime or datetime.utcnow()
-    hour = dt.hour
-    day_of_week = dt.weekday()
+    dt = target_datetime or datetime.now(timezone.utc)
+    # BUGFIX (naive datetime / timezone handling): same fix as
+    # crowd_predictor.predict_crowd / delay_predictor.predict_delay -
+    # peak-hour/weekend features are business-local concepts, derived
+    # from `dt` converted into the app's configured business timezone
+    # rather than `dt`'s own tzinfo. `dt` itself is unchanged. See
+    # app/utils/timezone.py.
+    local_dt = to_business_time(dt)
+    hour = local_dt.hour
+    day_of_week = local_dt.weekday()
     is_weekend = 1 if day_of_week in (5, 6) else 0
     is_peak_hour = 1 if (8 <= hour <= 11 or 17 <= hour <= 20) else 0
 

@@ -7,9 +7,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+
+from app.core.rate_limit import _rate_limit_exceeded_handler_with_retry_after
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ from app.api.v1 import (
     alerts,
     analytics,
     authentication,
+    chatbot,
     checkin,
     checkout,
     crowd,
@@ -131,7 +133,7 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler_with_retry_after)
 # Required for `limiter`'s default_limits (and any @limiter.limit(...) on a
 # route) to actually be enforced - see app/core/rate_limit.py's module
 # docstring. This is a BaseHTTPMiddleware subclass, so it only wraps "http"
@@ -318,6 +320,7 @@ app.include_router(news.router, prefix=API_PREFIX)
 app.include_router(notifications.router, prefix=API_PREFIX)
 app.include_router(meta.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
+app.include_router(chatbot.router, prefix=API_PREFIX)
 
 @app.get("/")
 def home():
@@ -336,14 +339,38 @@ def healthz():
     Render, etc.) look for by default."""
     return {"status": "ok"}
 
+_WS_AUTH_SUBPROTOCOL = "access_token"
+
 @app.websocket("/ws/monitor")
-async def websocket_monitor(websocket: WebSocket, token: str | None = None):
-    """`?token=` is optional so existing public/anonymous usage (crowd
-    and train-position broadcasts) keeps working unauthenticated. When
-    a token is present it's decoded with the same Supabase verification
+async def websocket_monitor(websocket: WebSocket):
+    """Auth is optional so existing public/anonymous usage (crowd and
+    train-position broadcasts) keeps working unauthenticated. When a
+    token is present it's decoded with the same Supabase verification
     used on REST requests, and the connection is registered under that
     user_id so notification_service can target them directly (see
-    ConnectionManager.notify_user)."""
+    ConnectionManager.notify_user).
+
+    The token travels via the `Sec-WebSocket-Protocol` header, not the
+    URL's `?token=` query string: browsers can't set custom headers on
+    a WS upgrade request, but the subprotocol list is exactly this
+    kind of small out-of-band handshake data, and - unlike a query
+    string - it's never written to server access logs, proxy logs,
+    Referer headers, or browser history. The client offers two
+    subprotocol values, a fixed marker plus the token itself; we read
+    both off the header here and, if present, echo the marker back as
+    the single accepted subprotocol (required by the handshake spec
+    whenever the client sent the header)."""
+    offered = [
+        p.strip()
+        for p in (websocket.headers.get("sec-websocket-protocol") or "").split(",")
+        if p.strip()
+    ]
+    token = None
+    accepted_subprotocol = None
+    if len(offered) >= 2 and offered[0] == _WS_AUTH_SUBPROTOCOL:
+        accepted_subprotocol = offered[0]
+        token = offered[1]
+
     user = None
     if token:
         db = SessionLocal()
@@ -352,7 +379,11 @@ async def websocket_monitor(websocket: WebSocket, token: str | None = None):
         finally:
             db.close()
 
-    await manager.connect(websocket, user_id=str(user.id) if user else None)
+    await manager.connect(
+        websocket,
+        user_id=str(user.id) if user else None,
+        subprotocol=accepted_subprotocol,
+    )
     # Labels the eventual manager.disconnect() call below for
     # ws_disconnects_total (see app/core/metrics.py) - purely
     # observational, doesn't change which exceptions are caught or

@@ -24,7 +24,7 @@ data, never invented:
 import logging
 import os
 import time as _time
-from datetime import date, datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 
 import joblib
@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from app.ai_engine.prediction.crowd_predictor import predict_crowd
 from app.core import cache
 from app.models.train import Train
+from app.utils.timezone import business_today, to_business_time
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,12 @@ def _compute_fleet_stats(db: Session) -> tuple[float, float]:
     capacities = [c for c, _ in rows if c is not None]
     avg_capacity = sum(capacities) / len(capacities) if capacities else 1200.0
 
-    today = date.today()
+    # BUGFIX (naive datetime / timezone handling): `date.today()` reads
+    # the naive server-local clock, which can disagree with the app's
+    # configured business timezone (and drifts the computed age by a
+    # day right around midnight, depending on what timezone the
+    # process happens to run in). See app/utils/timezone.py.
+    today = business_today()
     ages = [(today - commissioned).days for _, commissioned in rows if commissioned is not None]
     avg_age_days = sum(ages) / len(ages) if ages else 0.0
 
@@ -166,7 +172,7 @@ def _real_train_age_days(db: Session | None, train_id: int | None) -> float:
     if train_id is not None:
         train = db.get(Train, train_id)
         if train is not None and train.commissioned_date is not None:
-            return float((date.today() - train.commissioned_date).days)
+            return float((business_today() - train.commissioned_date).days)
 
     _, avg_age_days = _fleet_stats(db)
     return avg_age_days
@@ -177,9 +183,16 @@ def predict_delay(
     train_id: int | None = None,
     db: Session | None = None,
 ) -> dict:
-    dt = target_datetime or datetime.utcnow()
-    hour = dt.hour
-    day_of_week = dt.weekday()
+    dt = target_datetime or datetime.now(timezone.utc)
+    # BUGFIX (naive datetime / timezone handling): same fix as
+    # crowd_predictor.predict_crowd - peak-hour/weekend features are
+    # business-local concepts, so they're derived from `dt` converted
+    # into the app's configured business timezone, not from `dt`'s own
+    # (usually UTC) tzinfo. `dt` itself is unchanged. See
+    # app/utils/timezone.py.
+    local_dt = to_business_time(dt)
+    hour = local_dt.hour
+    day_of_week = local_dt.weekday()
     is_weekend = 1 if day_of_week in (5, 6) else 0
     is_peak_hour = 1 if (8 <= hour <= 11 or 17 <= hour <= 20) else 0
 

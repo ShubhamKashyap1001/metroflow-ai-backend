@@ -1,15 +1,4 @@
-"""Pure unit tests for the Phase 1 (P0-1 / P2-3) smart-recommendations
-request/write-storm fix, isolated from the DB/Redis/ML-model layers via
-mocks so they don't need a live Postgres or Redis instance (unlike most
-of this project's other tests - see docs/ai-recommendations.md).
 
-NOTE: this sandbox had no network access to install fastapi/sqlalchemy/
-redis/etc (a stricter limitation than Phase 0's "no Postgres" - see
-docs/ai-recommendations.md), so these could not actually be executed here.
-They're written to run unmodified in the project's normal
-`pip install -r requirements.txt && pytest` setup, and every assertion
-was traced by hand against app/services/prediction_service.py.
-"""
 from unittest.mock import MagicMock, patch
 
 from app.services import prediction_service as ps

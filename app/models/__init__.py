@@ -1,5 +1,6 @@
 from app.models.user_profile import UserProfile
 from app.models.metro_line import MetroLine
+from app.models.route import Route
 from app.models.station import Station
 from app.models.line_station import LineStation
 from app.models.journey import Journey
@@ -15,6 +16,7 @@ from app.models.alert import Alert
 from app.models.ai_model import AIModel
 from app.models.notification_log import NotificationLog
 from app.models.notification import Notification
+from app.models.notification_read_state import NotificationReadState
 from app.models.notification_dispatch_job import NotificationDispatchJob
 from app.models.enquiry import Enquiry
 from app.models.news import News

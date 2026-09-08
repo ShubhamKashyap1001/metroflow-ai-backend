@@ -1,28 +1,4 @@
-"""Response-size / server-side-cost regression tests for the
-train/schedule list endpoints (schedule_service.py) and the
-analytics/user/enquiry list endpoints (enquiry_service.py,
-app/api/v1/users.py).
 
-These close the same gap tests/test_pagination_limits.py already
-covers for alerts/notifications/predictions (Phase 9), but for the
-three read paths that were never given equivalent test coverage even
-though the service-layer fix (DEFAULT_*_LIMIT / MAX_*_LIMIT +
-hard-clamped offset/limit) was already applied:
-
-  - schedule_service.list_schedules / peak_hour_schedules /
-    delayed_schedules - the Dispatch Board's most-hit reads.
-  - enquiry_service.list_enquiries - the "My Enquiries" list and the
-    admin "manage enquiries" queue.
-  - app/api/v1/users.py::get_users - the admin "User Management" list.
-
-Same style as test_pagination_limits.py: pure unit tests against the
-service layer (or, for get_users, the route function directly) with
-the DB mocked out via MagicMock, since this sandbox has no network
-access to stand up a real Postgres. Each test asserts the clamp
-actually reaches the query (the .limit()/.offset() call args), not
-just that the function returns something - that's the part that
-protects the server from an unbounded fetch.
-"""
 from unittest.mock import MagicMock, patch
 
 from app.api.v1 import users as users_router

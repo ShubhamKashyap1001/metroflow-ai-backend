@@ -8,7 +8,6 @@ for that city's stations) vs a bug.
     python -m app.database.diagnose_schedule_coverage
 """
 from collections import Counter
-from datetime import datetime
 
 from sqlalchemy import func
 
@@ -17,6 +16,7 @@ from app.database.session import SessionLocal
 from app.enums.day_type import DayType
 from app.models.station import Station
 from app.models.train_schedule import TrainSchedule
+from app.utils.timezone import business_now
 
 def run():
     db = SessionLocal()
@@ -43,7 +43,18 @@ def run():
         for city, day_type, count in rows:
             by_city.setdefault(city, Counter())[day_type.value] = count
 
-        today_day_type = DayType.WEEKEND if datetime.now().weekday() >= 5 else DayType.WEEKDAY
+        # BUGFIX (naive datetime / timezone handling): this used to
+        # resolve against the naive server-local clock, then (in a
+        # follow-up fix) against raw UTC - both of which can disagree
+        # with the actual day_type filter /schedules/upcoming applies
+        # (see schedule_service.py::_current_day_type()), the former
+        # depending on what timezone the machine running this
+        # diagnostic happens to be in, the latter because schedule
+        # rows are keyed on local business time, not UTC. Resolved
+        # against the same business timezone as _current_day_type()
+        # here too, so this diagnostic can never report a different
+        # "today" than the API it's meant to be diagnosing.
+        today_day_type = DayType.WEEKEND if business_now().weekday() >= 5 else DayType.WEEKDAY
         print(f"Today's day_type filter used by /schedules/upcoming: {today_day_type.value}\n")
 
         print(f"{'City':<15} {'weekday':>10} {'weekend':>10} {'holiday':>10}")

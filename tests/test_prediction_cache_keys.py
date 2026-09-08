@@ -1,36 +1,4 @@
-"""Cache hit/miss regression tests for the prediction-cache fix in
-app/services/prediction_service.py.
 
-Bug being guarded against: `_cached_predict_crowd` / `_cached_predict_delay`
-/ `_cached_recommend_frequency` used to build their Redis cache key from
-`target_datetime.isoformat()` - full microsecond precision - even though
-every predict_*/recommend_* model under app/ai_engine/prediction/ only
-ever reads `.hour`/`.weekday()` off that datetime. Since every one of
-these wrappers is called with `datetime.utcnow()` for "predict right
-now" requests (forecast_crowd, forecast_delay,
-recommend_train_frequency, smart_recommendations,
-smart_recommendations_bulk), the cache key was different on literally
-every call, so PREDICTION_CACHE_TTL_SECONDS never got a chance to serve
-a hit - the model re-ran on every request regardless of how recently an
-identical (same station, same hour) prediction had just been computed.
-
-The fix buckets the cache KEY (not the value handed to the model) to
-the top of the hour via `_cache_key_bucket`. These tests simulate a
-Redis-backed cache with a plain dict (get_json/set_json patched) and
-assert:
-
-  1. Two calls in the SAME hour (different minute/second/microsecond)
-     -> exactly ONE underlying model call (second call is a cache HIT).
-  2. Two calls in DIFFERENT hours -> TWO underlying model calls (still
-     correctly treated as distinct predictions - no over-caching).
-  3. The value returned by a cache hit is identical to what a fresh
-     compute would have produced for that same bucket.
-
-This does not touch/exercise the simulator's `predict_crowd(..., light=True)`
-hot path (app/simulator/live_simulator.py) at all - that call site never
-goes through `_cached_prediction`, so it's unaffected by this fix,
-matching "do not break realtime".
-"""
 import json
 from datetime import datetime
 from unittest.mock import MagicMock

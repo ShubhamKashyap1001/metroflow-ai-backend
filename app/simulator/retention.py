@@ -1,33 +1,3 @@
-"""Phase 2 — crowd_logs retention/rollup background job.
-
-Even with the write-side sampling fix in csv_replay_simulator.py
-(CROWD_HISTORY_INTERVAL_SECONDS), `crowd_logs` is still an append-only
-table that grows forever without something actively bounding it (see
-Phase 0's P2-2). This module is that "something":
-
-  1. Every CROWD_RETENTION_INTERVAL_SECONDS (default hourly), roll up
-     any raw crowd_logs row older than CROWD_LOG_ROLLUP_AFTER_DAYS
-     (default 2 days) into `crowd_logs_hourly` — one row per
-     (station_id, hour) holding avg/max/min/sample_count — and then
-     delete the raw rows that were just rolled up.
-  2. As a safety net (in case the rollup step above is ever disabled
-     or falls behind), also hard-delete any raw crowd_logs row older
-     than CROWD_LOG_RETENTION_DAYS (default 30 days) regardless of
-     whether it made it into a rollup.
-  3. Hard-delete crowd_logs_hourly rows older than
-     CROWD_LOG_HOURLY_RETENTION_DAYS (default ~400 days) so even the
-     rollup table doesn't grow forever.
-
-Nothing here touches the LIVE table (station_crowd_state) — that
-table's size is bounded by station count, not time, and is never
-subject to retention.
-
-Runs as its own asyncio background loop (same run_forever/scheduler
-pattern already used for the crowd/train simulators), gated by
-ENABLE_CROWD_RETENTION_JOB so it can be turned off (e.g. a read
-replica / non-primary worker in a future multi-instance deployment,
-see Phase 0's P2-1) without touching the simulator loops.
-"""
 from __future__ import annotations
 
 import asyncio

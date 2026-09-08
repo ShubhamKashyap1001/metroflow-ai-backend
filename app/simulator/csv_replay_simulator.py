@@ -1,64 +1,10 @@
-"""CSV-grounded live replay engine — NO invented/random numbers.
 
-Rewritten for the 2nd-generation dataset (stations.csv / passenger_flow.csv
-both carry a real `station_id`, e.g. "STN-DEL-YL-02"). This is a real
-improvement over the first version of this file, which had to match
-rows to stations by (city, station_name) because the old dataset had
-no shared key - that only worked for 6 stations. This version keys
-directly on Station.station_code == passenger_flow.csv's station_id,
-an exact string match, and the new passenger_flow.csv has real rows
-for all 324 stations, not just 6 - so every station on the dashboard
-now gets real live movement, not just Delhi/Mumbai/etc.'s one station
-each.
-
-On every tick it:
-  1. Looks at the *real* next row (in original chronological order)
-     for each station - every station now has CSV coverage.
-  2. Feeds that row's real entries/exits into a running net-flow
-     occupancy accumulator (occupancy += entries - exits, clamped at
-     0, reset at real day boundaries - see `_current_count_from_row`
-     and docs/crowd-data-correctness.md Bug 1; entries/exits are hourly
-     THROUGHPUT, not occupancy, so they are never simply summed), PLUS
-     however many real passengers are currently checked in at that
-     station (see `_active_checkins_by_station` below), and writes the
-     result into crowd_logs. The CSV part is always derived from
-     numbers that were ACTUALLY recorded for that station; the
-     check-in part is always a number that was ACTUALLY produced by a
-     real POST /checkin that hasn't checked out yet.
-  3. A real check-in's +1 is therefore NEVER erased by a later tick —
-     it rides on top of the CSV base value every time this loop
-     recomputes it, and only ever comes back down when that specific
-     passenger calls POST /checkout. Nothing here ever subtracts it
-     on its own.
-  4. Cycles back to the top of that station's CSV history once it
-     reaches the end, so it can run forever without repeating in a
-     way that looks static.
-  5. Broadcasts the update over the same websocket event the
-     frontend already listens to (`crowd_update`), so LiveStationsPanel
-     / KPISection / CrowdHeatMap update within one shared tick —
-     zero frontend changes needed.
-
-GENERALIZING TO A DIFFERENT/NEW CSV
-------------------------------------
-If someone swaps in yet another dataset, only the CONFIG block below
-needs editing:
-
-    CSV_PATH            -> path to the CSV to replay
-    COL_STATION_ID        -> column holding the station's real ID
-                              (must match Station.station_code)
-    COL_TIMESTAMP          -> column holding the timestamp
-    COL_ENTRIES / COL_EXITS -> the two throughput columns fed into the
-                                running net-flow occupancy accumulator
-                                (see _current_count_from_row) - NOT
-                                summed directly into current_count
-    COL_CROWD_LABEL        -> optional pre-computed crowd label column
-"""
 from __future__ import annotations
 
 import asyncio
 import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pandas as pd
 from sqlalchemy import func
@@ -563,7 +509,7 @@ async def replay_tick(db: Session) -> list[dict]:
         # pushed to them without a refresh, so it's relayed cluster-wide.
         await manager.broadcast_everywhere(
             CROWD_UPDATE,
-            {"updates": updates, "timestamp": datetime.utcnow().isoformat()},
+            {"updates": updates, "timestamp": datetime.now(timezone.utc).isoformat()},
         )
     return updates
 

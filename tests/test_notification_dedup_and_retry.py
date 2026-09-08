@@ -1,32 +1,4 @@
-"""Regression tests for alert/notification delivery: duplicate
-notifications + lost notifications during a temporary email/SMS
-provider outage.
 
-See docs/notification-delivery.md for the full writeup. Two independent bugs,
-two independent fixes, tested here in isolation (no live Postgres
-needed - see docs/notification-delivery.md for why these tests are
-written this way):
-
-1. **Duplicate notifications** - `PATCH /alerts/{id}/resolve` used to
-   gate its resolution email/SMS/bell-notification dispatch on
-   `notify_on_resolve` alone, not on whether the alert actually
-   transitioned to resolved in that call. A retried/duplicated
-   request (dropped response, double-click, client retry-on-timeout)
-   for an ALREADY-resolved alert re-sent the resolution notification
-   every single time. Fixed by having `alert_service.resolve_alert`
-   report whether it just performed the transition, and having the
-   route only dispatch when it did.
-
-2. **Lost notifications during a temporary provider failure** -
-   `send_alert_emails`/`send_alert_sms` had zero retry for a
-   TRANSIENT failure (a dropped SMTP connection, a connection-refused/
-   timed-out/5xx-or-429 response) - one attempt, then a permanent
-   "failed" log entry, even though the very next second might have
-   succeeded. Fixed with a bounded, backed-off retry that only
-   triggers for transient failures (a permanent one - bad address,
-   auth failure, a 5xx/4xx-non-retryable SMTP code - still fails on
-   the first attempt, exactly as before, with no needless retry).
-"""
 import io
 import smtplib
 import urllib.error
@@ -38,9 +10,6 @@ import pytest
 from app.core.config import settings
 
 
-# ---------------------------------------------------------------------
-# Fix #2a: email transient-failure retry (success / failure / retry)
-# ---------------------------------------------------------------------
 
 from app.core import email as email_mod
 
@@ -299,6 +268,11 @@ def test_resolve_alert_reports_transition_only_once():
 
     fake_alert = _make_fake_alert(is_resolved=False)
     fake_db = MagicMock()
+   
+    fake_db.execute.side_effect = [
+        SimpleNamespace(rowcount=1),
+        SimpleNamespace(rowcount=0),
+    ]
 
     with patch.object(alert_service, "get_alert", return_value=fake_alert), \
          patch.object(alert_service, "_broadcast_alert") as mock_broadcast:

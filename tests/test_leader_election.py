@@ -1,34 +1,4 @@
-"""Regression tests for simulator leader election.
-See docs/background-jobs-and-leader-election.md for the full writeup.
 
-Two bugs fixed:
-  1. The simulator could duplicate when Redis was unavailable at
-     startup (leader_election.py used to fail OPEN in that state -
-     every process just assumed "I'm alone").
-  2. Multiple worker processes must NEVER start multiple simulators,
-     even with Redis fully unreachable for the process's entire
-     lifetime.
-
-`app/simulator/local_lock.py` has zero third-party dependencies
-(stdlib `os`/`fcntl`/`tempfile`/`threading` only), so the tests in
-`TestLocalLockRealMultiProcess` below are REAL, not mocked: they spawn
-actual separate OS processes (via `subprocess`) and assert on the
-real, kernel-enforced exclusion between them - this is the same
-technique used to verify the fix by hand (see docs/background-jobs-and-leader-election.md's TEST
-section for the exact output).
-
-`app/simulator/leader_election.py` additionally imports
-`app.core.cache`, which imports the third-party `redis` package.
-Like this project's other DB/Redis-dependent tests (see docs/ai-recommendations.md,
-docs/crowd-data-correctness.md), `TestLeaderElectionIntegration` below needs
-that dependency installed to run - it's written for this project's
-normal (networked) dev/CI environment. It was not executed inside the
-offline verification sandbox used while writing this fix (no network
-access to install `redis`/`fastapi`), so it was instead verified by
-direct code trace against the exact same `local_lock` primitive that
-IS proven correct above, plus a hand-run reproduction (see
-docs/background-jobs-and-leader-election.md).
-"""
 import os
 import signal
 import subprocess

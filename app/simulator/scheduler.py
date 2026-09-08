@@ -1,19 +1,3 @@
-"""Starts/stops the four background loops (crowd simulator, train
-tracker, crowd retention job, notification bin retention job), each
-behind its own LeaderElection so that when multiple API worker
-processes are running, only ONE process actually executes a given loop
-at a time (see leader_election.py for why, and docs/background-jobs-and-leader-election.md
-for the full bug writeup).
-
-Public API (start_simulator, stop_simulator, start_train_tracker,
-stop_train_tracker, start_retention_job, stop_retention_job,
-is_simulator_running, is_train_tracker_running, is_retention_job_running,
-scheduler_status) is unchanged from Phase <=3 on purpose - app/main.py,
-app/api/v1/admin.py and app/api/v1/health.py call these exact names and
-need zero changes for this fix. The notification-bin job added here
-follows the same naming convention (start_/stop_/is_..._running) so it
-slots into the same callers with one extra pair of calls each.
-"""
 import functools
 
 from app.simulator.csv_replay_simulator import run_forever as run_crowd_forever

@@ -1,17 +1,4 @@
-"""Tests for app/core/metrics.py's `_RealtimeCollector` - the
-Prometheus-facing counterpart to the plain counters verified directly
-(dependency-free) in scripts/verify_realtime_metrics.py /
-tests/test_realtime_metrics_verification.py.
 
-Those two only prove the underlying counters in
-app/websocket/manager.py / app/simulator/leader_election.py behave
-correctly; they can't touch `prometheus_client` at all (unavailable in
-this project's offline sandbox - see their own docstrings). This file
-is the other half: it needs the real `fastapi`/`prometheus_client`
-(via the `client` fixture, same as tests/test_metrics.py), so it
-verifies the collector actually surfaces those counters at GET
-/metrics, correctly labeled.
-"""
 from prometheus_client.parser import text_string_to_metric_families
 
 from app.core import metrics
@@ -34,15 +21,19 @@ def _sample_value(family, **labels):
 
 def test_metrics_endpoint_exposes_the_new_ws_and_simulator_series(client):
     families = _families(client)
+    # Same parser quirk covered in tests/test_metrics.py: a Counter
+    # family's parsed name has its "_total" suffix stripped (the
+    # suffix is only re-appended at exposition/sample-name time), so
+    # only the gauges below keep their literal name here.
     for name in (
-        "ws_connections_total",
-        "ws_disconnects_total",
+        "ws_connections",
+        "ws_disconnects",
         "ws_active_connections",
-        "ws_event_send_failures_total",
-        "simulator_leader_heartbeats_total",
-        "simulator_leadership_acquired_total",
-        "simulator_leadership_lost_total",
-        "simulator_worker_crashes_total",
+        "ws_event_send_failures",
+        "simulator_leader_heartbeats",
+        "simulator_leadership_acquired",
+        "simulator_leadership_lost",
+        "simulator_worker_crashes",
         "simulator_leader_last_heartbeat_timestamp_seconds",
         "simulator_leader_state",
     ):

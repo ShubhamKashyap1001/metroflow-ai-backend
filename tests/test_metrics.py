@@ -1,29 +1,4 @@
-"""Tests for app/core/metrics.py and its wiring into app/main.py,
-app/database/database.py and app/core/cache.py.
 
-Grouped to match the two metric families described in
-app/core/metrics.py's module docstring:
-
-  1. API latency/error metrics - `route_label()`, and the
-     `metrics_middleware` in app/main.py that records
-     http_requests_total / http_request_duration_seconds for every
-     HTTP request (verified end-to-end via the `client` fixture).
-
-  2. PostgreSQL/Redis failure metrics - db_failures_total /
-     redis_failures_total, verified both directly (record_db_failure /
-     record_redis_failure) and at their real call sites
-     (app/database/database.py's `_record_db_failure` SQLAlchemy
-     event listener, app/core/cache.py's `_mark_down`, and
-     app/main.py's `db_pool_exhausted_handler`) - specifically
-     confirming those call sites only ever pass an exception CLASS
-     NAME through, never str()/repr() of the exception, which is what
-     keeps connection strings/credentials out of the metric.
-
-None of these tests need a live PostgreSQL or Redis connection: the
-call-site tests below invoke the actual production functions directly
-with a synthetic exception, rather than trying to provoke a real
-connection failure.
-"""
 import asyncio
 import types
 
@@ -108,10 +83,15 @@ def test_metrics_endpoint_returns_prometheus_text(client):
         family.name
         for family in text_string_to_metric_families(response.text)
     }
-    assert "http_requests_total" in families
+    # prometheus_client's Counter class strips a redundant trailing
+    # "_total" off the name it's given (it re-appends it only at
+    # exposition time), so the parsed family name for a Counter is the
+    # base name without that suffix - only the histogram (not a
+    # counter) keeps its literal name here.
+    assert "http_requests" in families
     assert "http_request_duration_seconds" in families
-    assert "db_failures_total" in families
-    assert "redis_failures_total" in families
+    assert "db_failures" in families
+    assert "redis_failures" in families
 
 
 def test_metrics_endpoint_not_exposed_in_openapi_schema(client):
@@ -133,13 +113,19 @@ def test_a_request_increments_http_requests_total_with_route_method_and_status(c
 
 
 def test_a_request_records_latency_in_the_duration_histogram(client):
+    # The private `._count` attribute this used to read no longer
+    # exists on prometheus_client 0.26.0's Histogram child (the pinned
+    # version - see requirements.txt). The +Inf bucket is a public,
+    # version-stable proxy for the total observation count: every
+    # observation falls into it by definition, so its value increments
+    # by exactly one per request the same way `._count` used to.
     before = metrics.HTTP_REQUEST_DURATION_SECONDS.labels(
         method="GET", route="/healthz"
-    )._count.get()
+    )._buckets[-1].get()
     client.get("/healthz")
     after = metrics.HTTP_REQUEST_DURATION_SECONDS.labels(
         method="GET", route="/healthz"
-    )._count.get()
+    )._buckets[-1].get()
     assert after == before + 1
 
 
@@ -270,7 +256,7 @@ def test_failure_reason_labels_never_contain_url_like_or_whitespace_content():
     space - the shape a leaked connection string or credential would
     have."""
     for family in text_string_to_metric_families(_metrics_text()):
-        if family.name not in ("db_failures_total", "redis_failures_total"):
+        if family.name not in ("db_failures", "redis_failures"):
             continue
         for sample in family.samples:
             reason = sample.labels.get("reason")

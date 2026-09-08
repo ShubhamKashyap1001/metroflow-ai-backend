@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 import time
 
@@ -13,6 +13,7 @@ from app.enums.crowd_level import CrowdLevel
 from app.enums.prediction_type import PredictionType
 from app.models.prediction import Prediction
 from app.models.station import Station
+from app.utils.timezone import to_business_time
 
 PREDICTION_CACHE_TTL_SECONDS = 300
 
@@ -63,7 +64,7 @@ def _cache_key_bucket(target_datetime: datetime) -> str:
     delay_predictor.py and frequency_predictor.py). But the three
     wrappers below were keying their Redis cache on
     `target_datetime.isoformat()` built straight from
-    `datetime.utcnow()` (forecast_crowd/forecast_delay/
+    `datetime.now(timezone.utc)` (forecast_crowd/forecast_delay/
     recommend_train_frequency/smart_recommendations/
     smart_recommendations_bulk all call these with "now") - a
     microsecond-precision timestamp that is different on every single
@@ -186,7 +187,7 @@ def _get_or_save_prediction(
     and returns the row the winner just wrote (retrying briefly in case
     it hasn't committed yet), so a request never comes back with a
     missing record. A genuine recompute always carries a fresh,
-    never-before-seen target_datetime (derived from datetime.utcnow()
+    never-before-seen target_datetime (derived from datetime.now(timezone.utc)
     at model-call time), so it can never collide with an older key and
     always wins its own write - nothing about a real, distinct
     prediction is ever suppressed or lost."""
@@ -250,7 +251,7 @@ def _require_station(db: Session, station_id: int) -> Station:
 def forecast_crowd(db: Session, station_id: int, target_datetime: datetime | None = None) -> Prediction:
     """Crowd prediction models."""
     _require_station(db, station_id)
-    dt = target_datetime or datetime.utcnow()
+    dt = target_datetime or datetime.now(timezone.utc)
     result = _cached_predict_crowd(station_id, dt)
     record = _get_or_save_prediction(
         db,
@@ -275,7 +276,7 @@ def forecast_demand(db: Session, station_id: int, hours_ahead: int = 6) -> list[
     see that constant's comment above for why."""
     _require_station(db, station_id)
     hours_ahead = min(max(hours_ahead or 1, 1), MAX_DEMAND_FORECAST_HOURS_AHEAD)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     records = []
     for i in range(1, hours_ahead + 1):
         target = now + timedelta(hours=i)
@@ -300,7 +301,7 @@ def forecast_demand(db: Session, station_id: int, hours_ahead: int = 6) -> list[
 def forecast_delay(db: Session, train_id: int, station_id: int) -> Prediction:
     """Delay impact prediction, feeding the Scheduling Management Module."""
     _require_station(db, station_id)
-    dt = datetime.utcnow()
+    dt = datetime.now(timezone.utc)
     result = _cached_predict_delay(db, station_id, dt, train_id=train_id)
     record = _get_or_save_prediction(
         db,
@@ -320,9 +321,17 @@ def forecast_delay(db: Session, train_id: int, station_id: int) -> Prediction:
 def recommend_train_frequency(db: Session, station_id: int, is_peak_hour: bool = False) -> Prediction:
     """Train frequency recommendations / resource utilization optimization."""
     _require_station(db, station_id)
-    target = datetime.utcnow()
+    target = datetime.now(timezone.utc)
     if is_peak_hour:
-        target = target.replace(hour=9)                                  
+        # BUGFIX (naive datetime / timezone handling): "9am" here means
+        # 9am for the metro network being scheduled, not 9am UTC -
+        # forcing `hour=9` directly on a UTC-aware datetime (the old
+        # code) pinned this to a UTC instant that recommend_frequency's
+        # own business-timezone peak-hour check (see
+        # app/ai_engine/prediction/frequency_predictor.py) could then
+        # disagree with. Resolved in the business timezone instead, so
+        # the forced hour and the peak-hour check it feeds agree.
+        target = to_business_time(target).replace(hour=9)
     result = _cached_recommend_frequency(station_id, target)
     record = _get_or_save_prediction(
         db,
@@ -342,7 +351,16 @@ def recommend_train_frequency(db: Session, station_id: int, is_peak_hour: bool =
 def traffic_pattern_analysis(db: Session, station_id: int) -> dict:
     """Traffic pattern analysis: 24h predicted demand curve for a station."""
     _require_station(db, station_id)
-    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    # BUGFIX (naive datetime / timezone handling): this used to anchor
+    # the 24-hour curve on the UTC "now", then label each of the 24
+    # points with a raw hour-of-day (0-23) and flag "is_peak_hour"
+    # against that same raw number - i.e. treating a UTC hour as if it
+    # were the metro network's local hour. Anchored in the app's
+    # business timezone instead, so "hour": 9 in the response really
+    # is 9am for the network being analyzed, and lines up with the
+    # business-local peak-hour check crowd_predictor.predict_crowd
+    # itself now applies. See app/utils/timezone.py.
+    now = to_business_time(datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     curve = []
     for hour in range(24):
         target = now.replace(hour=hour)
@@ -411,7 +429,12 @@ def all_stations_traffic_pattern(db: Session, state: str | None = None) -> dict:
         query = query.filter(Station.city.in_(cities))
     stations = query.all()
 
-    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    # BUGFIX (naive datetime / timezone handling): same fix as
+    # traffic_pattern_analysis above - anchored in the business
+    # timezone so the `hours` 0-23 fed into predict_crowd_bulk (and its
+    # day-of-week derived from `now`) line up with local business hours
+    # instead of UTC ones. See app/utils/timezone.py.
+    now = to_business_time(datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     station_ids = [s.id for s in stations]
     hours = list(range(24))
 
@@ -601,7 +624,7 @@ def smart_recommendations(db: Session, station_id: int) -> list[dict]:
     station; see smart_recommendations_bulk() for the many-stations-in-
     one-call version the dashboard actually uses now."""
     station = _require_station(db, station_id)
-    dt = datetime.utcnow()
+    dt = datetime.now(timezone.utc)
     crowd = _cached_predict_crowd(station_id, dt)
     delay = _cached_predict_delay(db, station_id, dt)
     frequency = _cached_recommend_frequency(station_id, dt)
@@ -636,7 +659,7 @@ def smart_recommendations_bulk(db: Session, station_ids: list[int]) -> dict[int,
     round trip instead of N) and the write path (see
     _maybe_persist_recommendation_predictions above) change.
     """
-    dt = datetime.utcnow()
+    dt = datetime.now(timezone.utc)
     # One query for every station's capacity instead of one per
     # station in the loop below (same N+1-avoidance pattern already
     # used elsewhere in this file/module - e.g. predict_crowd_bulk).

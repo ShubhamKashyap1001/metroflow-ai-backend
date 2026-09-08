@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.enums.crowd_level import CrowdLevel
@@ -78,7 +79,17 @@ def check_in(db: Session, user_id: str, source_station_id: int, destination_stat
 
     new_count, level = _stage_crowd_delta(db, source, +1)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Belt-and-braces for the check-then-insert race above: two
+        # simultaneous requests can both pass the active_journey_for_user()
+        # check before either commits. The DB's partial unique index
+        # (ux_journeys_one_active_per_user, one ACTIVE row per user_id)
+        # lets exactly one of them win; the loser lands here instead of
+        # creating a second ACTIVE journey.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="You already have an active journey - check out first")
     db.refresh(journey)
     invalidate_station_cache(source)
     # Live flow: backend change -> WebSocket -> frontend, no refresh
@@ -88,7 +99,23 @@ def check_in(db: Session, user_id: str, source_station_id: int, destination_stat
     return journey
 
 def check_out(db: Session, user_id: str, journey_id: int) -> Journey:
-    journey = db.get(Journey, journey_id)
+    # SELECT ... FOR UPDATE locks this journey row for the duration of
+    # the transaction (same fix already used for station crowd state -
+    # see apply_live_state_delta's docstring). Without it, two
+    # simultaneous checkout requests for the same journey can both
+    # read status=ACTIVE before either commits, and both go on to
+    # apply the fare/status update AND the crowd deltas below -
+    # completing the journey twice and double-counting the
+    # source/destination crowd change. The second request now blocks
+    # here until the first commits, then re-reads status as COMPLETED
+    # and is rejected by the check below instead of repeating the
+    # update.
+    journey = (
+        db.query(Journey)
+        .filter(Journey.id == journey_id)
+        .with_for_update()
+        .one_or_none()
+    )
     if not journey or str(journey.user_id) != str(user_id):
         raise HTTPException(status_code=404, detail="Active journey not found")
     if journey.status != JourneyStatus.ACTIVE:

@@ -1,24 +1,4 @@
-"""Regression tests for the Phase 29A fix: the crowd and train-position
-*tick loops* (app/simulator/csv_replay_simulator.py's _tick_sync,
-app/simulator/train_simulator.py's _track_tick_sync) write fresh live
-data straight to Postgres every ~5-10s and correctly broadcast it over
-the WebSocket, but never invalidated the Redis cache backing the REST
-reads (crowd:dashboard:*/crowd:latest:* and train:positions:*) the way
-every other crowd/train-writing path already does (see
-test_cache_invalidation_on_write.py for those).
 
-Effect of the bug: a dashboard widget that reacts to the crowd_update/
-train_position WebSocket push by refetching over REST (e.g.
-KPISection.tsx's debouncedCrowdRefetch) raced the cache and very often
-redisplayed the previous tick's numbers instead of the one that just
-arrived - the socket push itself was already correct, only the
-REST-refetch path was stale.
-
-These tests use the same in-memory fake-cache style as
-test_cache_invalidation_on_write.py so they run without a real
-Postgres/Redis instance - just asserting the tick loops *call*
-cache.delete() with the right keys after a tick that changed data.
-"""
 from unittest.mock import MagicMock
 
 import pytest

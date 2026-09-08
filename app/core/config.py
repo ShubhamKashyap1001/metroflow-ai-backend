@@ -41,12 +41,25 @@ class Settings(BaseSettings):
     AI_MODELS_DIR: str = "app/ai_engine/saved_models"
     AI_DATASETS_DIR: str = "app/ai_engine/datasets"
 
+    # BUGFIX (naive datetime / timezone handling): every train_schedule
+    # arrival/departure time, "peak hour" window, and day-of-week
+    # calculation in this app is meant to reflect the metro network's
+    # own local wall-clock time - not whatever timezone the server
+    # process happens to be running in, and not UTC either. All 12
+    # seeded cities (see app/utils/geo.py) sit in India, a single
+    # timezone with no DST, so one setting covers the whole network.
+    # Persisted timestamps stay UTC (DateTime(timezone=True) columns,
+    # `datetime.now(timezone.utc)` at write time) - only the
+    # date/peak-hour/schedule *calculations* derived from "now" are
+    # resolved against this timezone. See app/utils/timezone.py.
+    BUSINESS_TIMEZONE: str = "Asia/Kolkata"
+
     REDIS_URL: str | None = "redis://localhost:6379/0"
     CACHE_ENABLED: bool = True
                                                                        
     CACHE_TTL_SECONDS: int = 5
 
-    ENABLE_SIMULATOR: bool = True
+    ENABLE_SIMULATOR: bool = False
     # Each tick advances every station one row forward through its own
     # CSV history (app/simulator/csv_replay_simulator.py) - the dataset
     # has 18 hourly rows/station/day (5 AM-10 PM), so at the old 10s
@@ -102,8 +115,19 @@ class Settings(BaseSettings):
     # (and one transaction) in a single pass.
     CROWD_ROLLUP_BATCH_SIZE: int = 1000
 
-    ENABLE_TRAIN_TRACKING: bool = True
+    ENABLE_TRAIN_TRACKING: bool = False
     TRAIN_TRACK_INTERVAL_SECONDS: int = 10
+
+    # --- AI Chatbot (floating assistant widget) ---------------------
+    # Server-side only - never exposed to the frontend. If unset, the
+    # /chatbot endpoint returns 503 rather than failing at import
+    # time, so the rest of the app still boots fine without it.
+    GEMINI_API_KEY: str | None = None
+    CHATBOT_MODEL: str = "gemini-3.5-flash"
+    CHATBOT_MAX_TOKENS: int = 1536
+    # Hard cap on turns accepted from the client per request, so one
+    # request can't be used to smuggle an unbounded prompt in.
+    CHATBOT_MAX_HISTORY_MESSAGES: int = 20
 
     # --- Notification Bin (Phase 12) ---------------------------------
     # A "mark all as read" sweep stamps binned_at on every row it

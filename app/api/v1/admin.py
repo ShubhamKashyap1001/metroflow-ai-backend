@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
@@ -110,5 +110,5 @@ async def system_status(
         "scheduler": scheduler_status(),
         "websocket_connections": len(manager.active_connections),
         "log_counts": log_buffer.log_counts(),
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
     }

@@ -1,29 +1,4 @@
-"""Follow-up to Phase 9 (tests/test_pagination_limits.py) and the
-users/schedules pagination fixes: closes the two *remaining* gaps of
-the same two classes of bug -
 
-  1. An unbounded API response: news_service.list_news ran `.all()`
-     with no limit/offset at all - GET /news pulled the entire news
-     table into one JSON response, growing unbounded as announcements
-     accumulate.
-
-  2. Expensive list/history queries reached via an unbounded time
-     window instead of a raw limit: crowd_service.get_inflow_outflow /
-     get_inflow_outflow_bulk (used by get_station_monitor) and
-     analytics_service.traffic_analysis_report /
-     passenger_flow_overview all accept a caller-supplied `hours`
-     window with no upper bound - an oversized value degrades into
-     scanning/materializing the entire ever-growing crowd_logs table.
-
-Same style/reason as tests/test_pagination_limits.py: pure unit tests
-against the service layer via MagicMock/patch, since this sandbox has
-no network access to install fastapi/sqlalchemy/redis for a real
-TestClient + Postgres run. Each test simulates a "large dataset" by
-having the mocked query return however many rows the *clamped*
-bound implies, then asserts the clamp actually reached the query
-(offset/limit call args, or the `since` cutoff derived from `hours`),
-not just that the function returned something.
-"""
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -35,18 +10,10 @@ from app.services import news_service
 # --- news_service.list_news (unbounded API response) -----------------------
 
 def _query_chain(db: MagicMock):
-    """Return the mock object representing db.query(...).order_by(...)
-    - the point at which .offset()/.limit() are chained on in
-    list_news, matching the existing pagination test helper."""
-    return db.query.return_value.order_by.return_value
+    return db.query.return_value.filter.return_value.order_by.return_value
 
 
 def test_list_news_clamps_oversized_limit_and_paginates():
-    """A caller asking for an absurd page size (simulating someone
-    trying to pull the whole news table in one shot - e.g. years of
-    accumulated announcements) must be capped at MAX_NEWS_LIMIT, and
-    the cap must actually reach the DB query (.limit()), not just get
-    silently ignored."""
     db = MagicMock()
     chain = _query_chain(db)
     chain.offset.return_value.limit.return_value.all.return_value = [
@@ -61,11 +28,6 @@ def test_list_news_clamps_oversized_limit_and_paginates():
 
 
 def test_list_news_default_limit_used_when_not_specified():
-    """Regression guard: previously list_news took no limit/offset
-    parameters at all and ran a bare `.all()` - this asserts the new
-    default page size is actually applied even when the caller (e.g.
-    the existing frontend, which never passed these params) doesn't
-    specify one."""
     db = MagicMock()
     chain = _query_chain(db)
     chain.offset.return_value.limit.return_value.all.return_value = []
@@ -99,9 +61,6 @@ def test_list_news_zero_or_negative_limit_falls_back_to_at_least_one():
 
 
 def test_list_news_include_inactive_filter_still_applied_alongside_paging():
-    """Regression guard: the existing is_active filter (admins/
-    operators opting into drafts via include_inactive=True) must keep
-    working exactly as before now that paging has been added."""
     db = MagicMock()
     chain = _query_chain(db)
     chain.offset.return_value.limit.return_value.all.return_value = []
@@ -120,11 +79,6 @@ def test_list_news_include_inactive_filter_still_applied_alongside_paging():
 # (expensive history query reached via an unbounded `hours` window)
 
 def test_get_inflow_outflow_clamps_absurd_hours_window():
-    """A caller passing hours=87_600_000 ("10 thousand years",
-    simulating an attempt to force a full scan of the ever-growing
-    crowd_logs table) must have the window clamped to
-    MAX_HISTORY_WINDOW_HOURS - surfaced here via the returned
-    window_hours field, which reports the value actually used."""
     db = MagicMock()
     db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
 
@@ -134,9 +88,7 @@ def test_get_inflow_outflow_clamps_absurd_hours_window():
 
 
 def test_get_inflow_outflow_normal_request_is_unaffected():
-    """The frontend's real usage (hours=24 by default, up to 72 on the
-    Reports panel) must behave exactly as before - the cap should
-    never bite for reasonable values."""
+
     db = MagicMock()
     db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
 
@@ -146,12 +98,6 @@ def test_get_inflow_outflow_normal_request_is_unaffected():
 
 
 def test_get_inflow_outflow_bulk_clamps_absurd_hours_before_building_the_time_window():
-    """Verified directly at the point the time window is built: patch
-    `timedelta` itself (wrapping the real implementation so the
-    function under test still works) and assert it's invoked with the
-    CLAMPED value - proof the absurd input never reaches `since`
-    construction unclamped, regardless of any SQLAlchemy/query-layer
-    details."""
     db = MagicMock()
     db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
 

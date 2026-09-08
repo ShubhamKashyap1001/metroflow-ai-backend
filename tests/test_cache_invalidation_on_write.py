@@ -1,24 +1,3 @@
-"""Regression tests for the "data change -> cache invalidate -> realtime
-update" fix in app/services/schedule_service.py and
-app/services/train_service.py.
-
-Bug being guarded against: create_schedule()/update_schedule() and
-create_train()/update_train() committed straight to Postgres and
-returned, without ever touching the cache that their own read paths
-(list_schedules/peak_hour_schedules/delayed_schedules and
-list_live_positions) populate. A create or a direct PUT edit left
-every already-warmed cache entry serving pre-write data for up to the
-relevant TTL - and, for schedules specifically, also never emitted the
-already-defined-but-unused SCHEDULE_UPDATE websocket event, so a
-connected Dispatch Board tab (which disables its fallback poll while
-the socket is connected) never found out about the change at all.
-
-These tests use plain in-memory fakes for the cache and websocket
-manager (same style as tests/test_prediction_cache_keys.py) so they
-run without a real Redis or Postgres instance - just asserting the
-service layer *calls* delete/notify with the right keys/events, which
-is exactly the contract the fix is responsible for.
-"""
 from datetime import time
 from unittest.mock import MagicMock
 

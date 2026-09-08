@@ -69,9 +69,11 @@ class FakeWebSocket:
         self.fail_mode = fail_mode  # None | "raise"
         self.sent: list[str] = []
         self.accepted = False
+        self.subprotocol: str | None = None
 
-    async def accept(self):
+    async def accept(self, subprotocol: str | None = None):
         self.accepted = True
+        self.subprotocol = subprotocol
 
     async def send_text(self, payload: str):
         if self.fail_mode == "raise":

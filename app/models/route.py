@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import String
 from sqlalchemy import DateTime
@@ -33,7 +33,12 @@ class Route(Base):
         nullable=False
     )
 
+    # BUGFIX (timezone-aware timestamps): same class of fix as
+    # Journey.checkin_time/checkout_time (app/models/journey.py) -
+    # `DateTime` (naive) + `datetime.utcnow` (naive) meant this column
+    # never carried timezone info, unlike every other timestamp column
+    # in the project.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
     )
