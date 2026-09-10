@@ -17,15 +17,9 @@ pip install -r requirements.txt
 python -m app.database.init_db     # create tables (runs `alembic upgrade head`)
 python -m app.database.seed        # demo stations/trains/schedules (no login created)
 
-<<<<<<< Updated upstream
 alembic upgrade head
 
 python -m app.database.seed_real_data        # add --reset to replace an existing synthetic seed
-=======
-python -m app.database.seed_real_data
-
-        # add --reset to replace an existing synthetic seed
->>>>>>> Stashed changes
 
 # Sign up through the frontend (Supabase), then make yourself admin:
 python -m app.database.set_user_role <your-email> admin
@@ -54,5 +48,3 @@ uvicorn app.main:app --reload
 There is intentionally no `/api/v1/auth/register` or `/auth/login`
 endpoint on this backend - sign-up and login happen entirely on
 Supabase/the frontend. The only auth route here is `GET /api/v1/auth/me`.
-
-
