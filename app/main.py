@@ -182,44 +182,6 @@ async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Last-resort safety net for anything NOT already handled above
-    (HTTPException, RequestValidationError, RateLimitExceeded,
-    SATimeoutError) - a genuine bug, an unexpected third-party error,
-    an unguarded None/KeyError somewhere deep in a service call, etc.
-    Registering a handler for the bare `Exception` class here makes
-    FastAPI/Starlette route it into ServerErrorMiddleware (the
-    outermost layer, wrapping every middleware and route below it -
-    see Starlette's build_middleware_stack) instead of the framework's
-    own default 500 handling, WITHOUT touching how HTTPException or
-    the handlers above are dispatched (those go through a separate,
-    inner ExceptionMiddleware and are untouched by this).
-
-    Two problems this fixes:
-
-    1. "Uncontrolled" error shape - without this, an unhandled
-       exception falls through to Starlette's built-in default: a
-       bare, non-JSON "Internal Server Error" plain-text body. Every
-       other error response this API returns is JSON with a `detail`
-       key (see the 503 above, and FastAPI's own HTTPException
-       handling) - a plain-text 500 breaks any frontend caller that
-       unconditionally does `response.json()`, turning a clean
-       "something went wrong" into a confusing secondary parse error.
-       This handler always returns the same safe, consistent JSON
-       shape instead, regardless of what actually broke.
-
-    2. Sensitive detail exposure - Starlette's default 500 handling
-       renders a full HTML traceback (source snippets, local variable
-       values, file paths) straight into the response body if
-       `debug=True` is ever passed to FastAPI(...) - which isn't the
-       case today, but nothing previously stopped a future change (or
-       a misconfigured DEBUG-driven wiring) from doing so. This
-       handler makes that impossible: the exception's type, message,
-       and full traceback ONLY ever go to the server log
-       (exc_info=exc, tagged with the request method/path for
-       triage - visible to admins via /admin/logs, see
-       app/core/log_buffer.py) and never appear in the response body,
-       independent of DEBUG or any other setting.
-    """
     logger.error(
         "[unhandled] %s %s -> %s: %s",
         request.method,
@@ -235,14 +197,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    # Explicit allowlist only - see Settings.cors_origins_list for why
-    # a literal "*" in CORS_ORIGINS is dropped rather than treated as
-    # "allow everything" (it previously took an allow_origin_regex=".*"
-    # path here that, combined with allow_credentials=True below,
-    # reflected back any request's real Origin - i.e. every origin,
-    # credentialed, was effectively allowed. That regex path has been
-    # removed; only origins explicitly listed in CORS_ORIGINS are ever
-    # allowed now).
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
@@ -251,20 +205,6 @@ app.add_middleware(
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    """Records the two API-level metrics from app/core/metrics.py for
-    every HTTP request: http_requests_total (method/route/status) and
-    http_request_duration_seconds (method/route). Registered LAST
-    (see the middleware-order comment on CORSMiddleware above - the
-    last-added middleware ends up outermost), so this times the full
-    request including CORS/rate-limit handling, and still records a
-    result for requests that raise all the way out (an unhandled
-    exception ends up a 500 via app.exception_handler(Exception)
-    below - `finally` here still fires for that path, tagging it
-    accordingly, before re-raising so that handler still runs).
-
-    request.scope["route"] is only populated once routing has
-    matched, so the route label is resolved via metrics.route_label()
-    AFTER call_next() returns/raises - never before."""
     if request.url.path == "/metrics":
         # Don't record scrapes of the metrics endpoint itself.
         return await call_next(request)
@@ -330,7 +270,7 @@ def home():
         "docs": "/docs",
     }
 
-@app.get("/healthz")
+@app.api_route('/healthz', methods=["GET", "HEAD"])
 def healthz():
     """Plain liveness probe - deliberately does NOT touch the database
     (that's what /api/v1/health/ is for, as a readiness check). This is
