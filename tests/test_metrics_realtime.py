@@ -48,7 +48,10 @@ def test_ws_active_connections_reflects_the_real_manager_state(client):
 
 def test_ws_connections_total_matches_the_manager_snapshot(client):
     families = _families(client)
-    reported = families["ws_connections_total"].samples[0].value
+    # Counter family names are parsed without their "_total" suffix
+    # (see the comment on test_metrics_endpoint_exposes_the_new_ws_and_simulator_series
+    # above) - "ws_connections", not "ws_connections_total".
+    reported = families["ws_connections"].samples[0].value
     assert reported == manager.get_metrics_snapshot()["connects_total"]
 
 

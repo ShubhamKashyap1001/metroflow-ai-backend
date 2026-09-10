@@ -47,9 +47,9 @@ def get_binned_notifications(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    """Notifications a "mark all as read" sweep has moved out of the
-    Inbox - see the Bin section of app/models/notification.py's
-    docstring. Each one is hard-deleted
+    """Notifications a "mark all as read" sweep or a per-item delete
+    has moved out of the Inbox - see the Bin section of
+    app/models/notification.py's docstring. Each one is hard-deleted
     NOTIFICATION_BIN_RETENTION_HOURS (72h) after it landed here by the
     background job in app/simulator/notification_bin_retention.py, so
     this list naturally empties out on its own."""
@@ -81,8 +81,9 @@ def delete_notification(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    """Deletes one specific notification right away - the per-card
-    delete button, as opposed to the "Delete All" sweep below."""
+    """Moves one specific notification straight to the Bin - the
+    per-card delete button, as opposed to the "Delete All" sweep
+    below, which is permanent right away."""
     notification_service.delete_notification(db, notification_id, current_user)
 
 @router.delete("/", response_model=NotificationDeleteCount)
@@ -93,7 +94,8 @@ def delete_all_notifications(
     current_user: UserProfile = Depends(get_current_user),
 ):
     """Wipes every notification this user can see - Inbox and Bin
-    alike - in one go. Unlike "mark all as read" this is permanent and
+    alike - in one go. Unlike a single-item delete or "mark all as
+    read" (both of which land in the Bin first), this is permanent and
     immediate, no 72h grace period."""
     deleted = notification_service.delete_all_notifications(db, current_user)
     return {"deleted": deleted}

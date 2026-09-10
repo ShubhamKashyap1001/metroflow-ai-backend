@@ -113,19 +113,32 @@ def test_a_request_increments_http_requests_total_with_route_method_and_status(c
 
 
 def test_a_request_records_latency_in_the_duration_histogram(client):
-    # The private `._count` attribute this used to read no longer
-    # exists on prometheus_client 0.26.0's Histogram child (the pinned
-    # version - see requirements.txt). The +Inf bucket is a public,
-    # version-stable proxy for the total observation count: every
-    # observation falls into it by definition, so its value increments
-    # by exactly one per request the same way `._count` used to.
-    before = metrics.HTTP_REQUEST_DURATION_SECONDS.labels(
-        method="GET", route="/healthz"
-    )._buckets[-1].get()
+    # prometheus_client 0.26.0 (the pinned version - see requirements.txt)
+    # stores each Histogram child's private `_buckets[i]` *exclusively*:
+    # `observe()` increments only the single smallest bucket an
+    # observation fits into, then breaks - it does not keep a running
+    # cumulative count per bucket internally (see
+    # prometheus_client.metrics.Histogram.observe). Cumulative counts,
+    # matching the real Prometheus exposition format (each `le=...`
+    # bucket includes all observations <= that bound, and `le="+Inf"`
+    # equals the total observation count), only exist in the public
+    # `collect()` output. So read the total count from there instead
+    # of reaching into the private, non-cumulative `_buckets` array.
+    def _observation_count() -> float:
+        histogram = metrics.HTTP_REQUEST_DURATION_SECONDS
+        for family in histogram.collect():
+            for sample in family.samples:
+                if (
+                    sample.name.endswith("_count")
+                    and sample.labels.get("method") == "GET"
+                    and sample.labels.get("route") == "/healthz"
+                ):
+                    return sample.value
+        return 0.0
+
+    before = _observation_count()
     client.get("/healthz")
-    after = metrics.HTTP_REQUEST_DURATION_SECONDS.labels(
-        method="GET", route="/healthz"
-    )._buckets[-1].get()
+    after = _observation_count()
     assert after == before + 1
 
 

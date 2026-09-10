@@ -81,8 +81,20 @@ SYSTEM_PROMPT = (
     "screen (Live Trains, Crowd Monitor, Alerts, etc.) - never "
     "point the user to an external site or AI tool.\n\n"
     "Keep answers concise and conversational, formatted for a small "
-    "chat panel - short paragraphs, and Markdown lists only when they "
-    "genuinely help."
+    "chat panel. Use Markdown to make multi-part answers easy to "
+    "scan:\n"
+    "- Bold short labels for key facts, e.g. **Crowd:**, **Delay:**, "
+    "**Next train:**, one per line, instead of burying them in a "
+    "sentence.\n"
+    "- Use a bullet list whenever you're giving 2+ items of the same "
+    "kind (multiple trains, stations, or alerts) - one bullet per "
+    "item, not a comma-separated sentence.\n"
+    "- Keep each bullet/line short (under ~15 words) - this renders "
+    "in a narrow chat bubble, not a document.\n"
+    "- A one-line intro sentence before the list/facts is fine; skip "
+    "long lead-ins or closing summaries.\n"
+    "- Never use headings (#, ##) or tables - they don't fit the chat "
+    "panel. Plain paragraphs, bold labels, and bullet lists only."
 )
 
 # Gemini function-declaration format: {"name", "description", "parameters"}
