@@ -378,14 +378,18 @@ def mark_all_read(db: Session, current_user: UserProfile) -> int:
     return updated
 
 def delete_notification(db: Session, notification_id: int, current_user: UserProfile) -> None:
-    """Removes a single notification the moment the user asks for it -
-    unlike mark_all_read, this doesn't wait out the Bin window first.
-    Same broadcast-or-mine ownership check as mark_read/mark_all_read.
-    A personal row is hard-deleted (only this user ever owns it, so
-    that's already per-user). A broadcast row (user_id NULL) is never
-    removed or altered - deleting it records a per-user `deleted_at`
-    overlay instead, so it disappears from this user's Inbox/Bin only
-    and every other user's copy is untouched."""
+    """The per-card delete button: moves a single notification straight
+    to the Bin instead of waiting for a "mark all as read" sweep to get
+    to it - same destination (list_binned_notifications), just
+    triggered per-item and immediately. It's still recoverable for
+    NOTIFICATION_BIN_RETENTION_HOURS from there, same as anything else
+    in the Bin; only "Delete All" (delete_all_notifications) is
+    permanent right away. Same broadcast-or-mine ownership check as
+    mark_read/mark_all_read. A personal row gets its own `binned_at`
+    stamped (only this user ever owns it, so that's already per-user).
+    A broadcast row (user_id NULL) is never altered directly - this
+    records a per-user `binned_at` overlay instead, so it moves to the
+    Bin for this user only and every other user's copy is untouched."""
     notification = db.get(Notification, notification_id)
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -395,11 +399,13 @@ def delete_notification(db: Session, notification_id: int, current_user: UserPro
         raise HTTPException(status_code=404, detail="Notification not found")
 
     if notification.user_id is None:
-        _mark_broadcast_state(db, current_user, notification.id, "deleted_at")
+        _mark_broadcast_state(db, current_user, notification.id, "binned_at")
         db.commit()
     else:
-        db.delete(notification)
-        db.commit()
+        if notification.binned_at is None:
+            notification.binned_at = datetime.now(timezone.utc)
+            db.add(notification)
+            db.commit()
 
     manager.notify_user(
         str(current_user.id),

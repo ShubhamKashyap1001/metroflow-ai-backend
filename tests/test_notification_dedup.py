@@ -14,6 +14,31 @@ from app.core.config import settings
 from app.core import email as email_mod
 
 
+def _fake_request(path="/api/v1/alerts/42/resolve", method="PATCH"):
+    """A minimal but real starlette.requests.Request - needed because
+    slowapi's @limiter.limit decorator does `isinstance(request,
+    Request)` on whatever the endpoint was called with, so a
+    duck-typed stand-in (like tests/test_metrics.py's _FakeRequest,
+    which only needs to satisfy route_label()'s much narrower needs)
+    isn't enough here. This carries just enough ASGI scope for
+    slowapi's default key_func (get_ipaddr, reads request.client) and
+    for it to set request.state.view_rate_limit.
+    """
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": [],
+        "query_string": b"",
+        "client": ("testclient", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+    return Request(scope)
+
+
 def _fake_smtp_response(status=201):
     cm = MagicMock()
     cm.__enter__.return_value = MagicMock(status=status)
@@ -311,6 +336,7 @@ def test_resolve_endpoint_only_dispatches_on_actual_transition():
     ), patch.object(alerts_router.notification_dispatch_queue, "enqueue_and_submit") as mock_submit:
         # First call: alert actually transitions -> dispatch exactly once.
         alerts_router.resolve_alert(
+            request=_fake_request(),
             alert_id=42,
             payload=AlertResolve(notify_on_resolve=True),
             db=fake_db,
@@ -322,6 +348,7 @@ def test_resolve_endpoint_only_dispatches_on_actual_transition():
         # alert is already resolved, so no further dispatch happens
         # even though notify_on_resolve is still true.
         alerts_router.resolve_alert(
+            request=_fake_request(),
             alert_id=42,
             payload=AlertResolve(notify_on_resolve=True),
             db=fake_db,

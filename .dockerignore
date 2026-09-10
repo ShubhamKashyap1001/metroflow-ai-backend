@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.venv
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+docs/
+postman/
+colab_training/
+scripts/
+*.md
+.DS_Store

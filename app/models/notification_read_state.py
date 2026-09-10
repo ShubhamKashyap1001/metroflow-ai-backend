@@ -66,9 +66,13 @@ class NotificationReadState(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Set the moment THIS user deletes the broadcast row - the row
-    # itself is never removed (other users still see it), this just
-    # hides it from this user's Inbox and Bin permanently.
+    # Set the moment THIS user hits "Delete All" and it sweeps up this
+    # broadcast row (see notification_service.delete_all_notifications)
+    # - the row itself is never removed (other users still see it),
+    # this just hides it from this user's Inbox and Bin permanently,
+    # skipping the Bin entirely. A per-card delete on a single
+    # broadcast row uses `binned_at` above instead, same as "mark all
+    # as read", so it still goes through the Bin first.
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
