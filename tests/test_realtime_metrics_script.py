@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "verify_realtime_metrics.py"
 
 
-def test_realtime_metrics_verification_script_passes():
+def test_realtime_metrics_script_passes():
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True, text=True, timeout=60,

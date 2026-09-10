@@ -156,7 +156,7 @@ creates the `notification_dispatch_jobs` table on an existing database
 
 ## Tests
 
-`tests/test_notification_dedup_and_retry.py` covers both fixes in
+`tests/test_notification_dedup.py` covers both fixes in
 isolation (no live Postgres needed — pure logic/mocked transport):
 
 1. Duplicate-notification prevention: a repeated `PATCH

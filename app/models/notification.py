@@ -29,13 +29,18 @@ app/services/notification_service.py.
 Bin (Phase 12): hitting "mark all as read" doesn't just flip
 `is_read` - it also stamps `binned_at` on every row it touches,
 which immediately excludes those rows from list_notifications()
-(the main Inbox feed). They still exist and are reachable via the
-separate Bin tab (list_binned_notifications()) until
+(the main Inbox feed). The per-card delete button
+(notification_service.delete_notification) stamps the same
+`binned_at` on just the one row it's called on. Either way, the
+row still exists and is reachable via the separate Bin tab
+(list_binned_notifications()) until
 `app/simulator/notification_bin_retention.py`'s background job
 hard-deletes anything whose `binned_at` is older than
-NOTIFICATION_BIN_RETENTION_HOURS (24) - see that module and
-notification_service.mark_all_read/list_binned_notifications.
-A single item marked read individually (mark_read()) is NOT
+NOTIFICATION_BIN_RETENTION_HOURS (72) - see that module and
+notification_service.mark_all_read/delete_notification/
+list_binned_notifications. Only "Delete All"
+(delete_all_notifications) skips the Bin and removes rows right
+away. A single item marked read individually (mark_read()) is NOT
 binned - it just stops being unread and stays in the Inbox, same
 as before this change.
 """
@@ -132,11 +137,12 @@ class Notification(TimestampMixin, Base):
     )
 
     # NULL = sitting in the normal Inbox feed. Set the moment a
-    # "mark all as read" sweep touches this row (see
-    # notification_service.mark_all_read) - from then on it's excluded
+    # "mark all as read" sweep touches this row, or the per-card
+    # delete button is used on it (see notification_service.
+    # mark_all_read/delete_notification) - from then on it's excluded
     # from list_notifications() and only shows up in the Bin tab, until
-    # the bin retention job hard-deletes it 24h later. Never set by
-    # mark_read() (single-item read).
+    # the bin retention job hard-deletes it NOTIFICATION_BIN_RETENTION_
+    # HOURS later. Never set by mark_read() (single-item read).
     binned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
