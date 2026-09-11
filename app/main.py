@@ -81,8 +81,19 @@ async def lifespan(app: FastAPI):
     # letting the first real prediction request pay that cost (see
     # app/ai_engine/warmup.py). Runs in a worker thread so a slow disk
     # read can't block the event loop from coming up.
-    from app.ai_engine.warmup import warm_up_models
-    await asyncio.to_thread(warm_up_models)
+    #
+    # Gated behind AI_EAGER_WARMUP (default False - see
+    # app/core/config.py): loading all 3 bundles back-to-back during
+    # boot, on top of importing numpy/pandas/scipy/scikit-learn/
+    # xgboost, is exactly the kind of startup memory spike that trips
+    # a 512MB free-tier instance's OOM killer. With this off, each
+    # predictor still lazy-loads (and caches) itself on its own first
+    # use - the simulator's first tick, or the first real API request
+    # - so the same memory cost is paid, just spread out instead of
+    # all at once at boot.
+    if settings.AI_EAGER_WARMUP:
+        from app.ai_engine.warmup import warm_up_models
+        await asyncio.to_thread(warm_up_models)
 
     # Phase 11: resume any alert email/SMS dispatch a previous process
     # left QUEUED or IN_PROGRESS (deploy, crash, hard kill) before this

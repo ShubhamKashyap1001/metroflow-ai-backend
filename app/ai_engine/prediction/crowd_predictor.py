@@ -26,6 +26,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from app.ai_engine.model_bundle import prune_to_winner
 from app.utils.timezone import to_business_time
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def _load_model():
         print(f"[{__name__}] no trained model at {MODEL_PATH} - using heuristic fallback")
         return None
     try:
-        return joblib.load(MODEL_PATH)
+        return prune_to_winner(joblib.load(MODEL_PATH))
     except Exception as exc:
                                                                      
         print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")

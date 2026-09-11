@@ -9,8 +9,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
-    DB_POOL_SIZE: int = 15
-    DB_MAX_OVERFLOW: int = 25
+    # Lowered from 15/25 -> 5/5: on a 512MB free-tier instance (e.g.
+    # Render's free plan) a 40-connection ceiling is far more than one
+    # worker process needs and each connection carries its own client-
+    # side buffers, so this trims idle memory overhead. Raise these
+    # back up via env vars once you're on a bigger instance / see pool
+    # -exhaustion 503s under real load.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
     DB_POOL_TIMEOUT: int = 10
     DB_POOL_RECYCLE: int = 300
 
@@ -40,6 +46,36 @@ class Settings(BaseSettings):
 
     AI_MODELS_DIR: str = "app/ai_engine/saved_models"
     AI_DATASETS_DIR: str = "app/ai_engine/datasets"
+
+    # --- Free-tier / low-memory deployment knobs ---------------------
+    # AI_EAGER_WARMUP: when True, all 3 model bundles (crowd/delay/
+    # frequency) are loaded during startup (app/ai_engine/warmup.py) so
+    # the first real request never pays the joblib.load() cost. On a
+    # 512MB instance, loading all 3 up front - on top of importing
+    # numpy/pandas/scipy/scikit-learn/xgboost - can push the process
+    # over the memory limit before it even starts accepting traffic.
+    # Defaulting this to False makes each predictor load lazily on its
+    # own first use instead (still cached after that via lru_cache),
+    # spreading the same total memory cost out over the first few
+    # requests/simulator ticks rather than paying it all at once during
+    # boot. Set to True once you're on an instance with more headroom.
+    AI_EAGER_WARMUP: bool = False
+
+    # AI_MODEL_LIGHT_MODE: each saved model bundle actually contains
+    # TWO fully-trained models (random_forest and xgboost) so the
+    # dashboard can show both predictions side by side. When True,
+    # each bundle is pruned down to just its winning (lowest-MAE)
+    # model right after loading, dropping the other from `models`.
+    #
+    # Measured cost of keeping both candidates loaded (single worker,
+    # all 3 bundles): only ~17.6MB total, of which pruning to one
+    # candidate each saves ~3.7MB - xgboost's own library import
+    # (~150MB) is paid regardless, since frequency_model.pkl's winner
+    # is xgboost either way. That's not worth losing the side-by-side
+    # comparison feature over, so this defaults to False. Only flip it
+    # to True if you're chasing every last MB on an instance that's
+    # still right at the OOM line even after WEB_CONCURRENCY=1.
+    AI_MODEL_LIGHT_MODE: bool = False
 
     # BUGFIX (naive datetime / timezone handling): every train_schedule
     # arrival/departure time, "peak hour" window, and day-of-week

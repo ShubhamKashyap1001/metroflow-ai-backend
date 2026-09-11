@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database.init_db import create_tables
 from app.database.session import SessionLocal
@@ -239,48 +240,79 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
 
         ops_df = ops_df.sort_values(["train_id", "station_id", "scheduled_arrival"])
 
-        CHUNK_SIZE = 5000
+        # --- Speed fix ---------------------------------------------------
+        # The old version called `.iterrows()` (slow - boxes every row into
+        # a Series) and ran `db.commit()` every 5,000 rows. Against a
+        # remote DB (e.g. Supabase) each commit is a network round-trip,
+        # so with ~311k rows / 5,000 = ~62 round-trips just for commits,
+        # on top of per-row Python overhead from iterrows(). Two changes:
+        #   1. Vectorize the per-row-identical column math (weekday, hour,
+        #      is_peak, day_type, delay floats) ONCE across the whole
+        #      DataFrame with pandas, instead of recomputing it per row in
+        #      a Python loop.
+        #   2. Use `itertuples()` instead of `iterrows()` (itertuples
+        #      yields lightweight namedtuples - no per-row Series boxing -
+        #      and is typically 5-10x faster for this kind of loop), and
+        #      commit much less often by growing CHUNK_SIZE.
+        ops_df["calc_is_weekend"] = ops_df["scheduled_arrival"].dt.weekday >= 5
+        ops_df["calc_hour"] = ops_df["scheduled_arrival"].dt.hour
+        ops_df["calc_is_peak"] = ops_df["calc_hour"].between(8, 11) | ops_df["calc_hour"].between(17, 20)
+        ops_df["calc_day_type"] = ops_df["calc_is_weekend"].map({True: DayType.WEEKEND, False: DayType.WEEKDAY})
+        ops_df["calc_delay_arrival"] = ops_df["delay_arrival_min"].astype(float)
+        ops_df["calc_delay_departure"] = ops_df.get("delay_departure_min", 0)
+        ops_df["calc_delay_departure"] = ops_df["calc_delay_departure"].fillna(0).astype(float)
+        ops_df["calc_delay_minutes"] = ops_df["calc_delay_arrival"].round().astype(int)
+        ops_df["calc_status"] = ops_df["calc_delay_minutes"].apply(
+            lambda m: ScheduleStatus.DELAYED if m > 0 else ScheduleStatus.ON_TIME
+        )
+
+        # Bigger chunks = fewer network round-trips against a remote DB.
+        # Commit only every few chunks instead of every chunk - if the run
+        # dies partway through, --reset starts clean again anyway, so
+        # there's nothing gained from committing more often than this.
+        CHUNK_SIZE = 20000
+        COMMIT_EVERY_N_CHUNKS = 3
         history_dicts: list[dict] = []
         timetable_by_slot: dict[tuple[int, int, DayType], dict] = {}
         dropped = 0
         history_inserted = 0
-        for _, orow in ops_df.iterrows():
-            train = train_by_number.get(orow["train_id"])
-            db_station = station_rows.get(orow["station_id"])
+        chunks_since_commit = 0
+        for orow in ops_df.itertuples(index=False):
+            train = train_by_number.get(orow.train_id)
+            db_station = station_rows.get(orow.station_id)
             if not train or not db_station:
                 dropped += 1
                 continue
 
-            arrival_dt = orow["scheduled_arrival"]
-            departure_dt = orow["scheduled_departure"]
-            is_weekend = arrival_dt.weekday() >= 5
-            hour = arrival_dt.hour
-            is_peak = 8 <= hour <= 11 or 17 <= hour <= 20
-            day_type = DayType.WEEKEND if is_weekend else DayType.WEEKDAY
-            delay_arrival = float(orow["delay_arrival_min"])
-            delay_departure = float(orow.get("delay_departure_min", 0) or 0)
-            station_sequence = int(orow["station_sequence"])
+            arrival_dt = orow.scheduled_arrival
+            departure_dt = orow.scheduled_departure
+            day_type = orow.calc_day_type
+            delay_arrival = orow.calc_delay_arrival
+            station_sequence = int(orow.station_sequence)
 
             # 1. Full-granularity history row - always inserted.
             history_dicts.append({
-                "trip_id": str(orow["trip_id"]),
+                "trip_id": str(orow.trip_id),
                 "train_id": train.id,
                 "station_id": db_station.id,
                 "service_date": arrival_dt.date(),
                 "station_sequence": station_sequence,
                 "scheduled_arrival": arrival_dt.time(),
                 "scheduled_departure": departure_dt.time(),
-                "actual_arrival": orow["actual_arrival"].time() if pd.notna(orow["actual_arrival"]) else None,
-                "actual_departure": orow["actual_departure"].time() if pd.notna(orow["actual_departure"]) else None,
+                "actual_arrival": orow.actual_arrival.time() if pd.notna(orow.actual_arrival) else None,
+                "actual_departure": orow.actual_departure.time() if pd.notna(orow.actual_departure) else None,
                 "delay_arrival_min": delay_arrival,
-                "delay_departure_min": delay_departure,
-                "passenger_density": orow.get("passenger_density") or None,
-                "weather": orow.get("weather") or None,
-                "delay_reason": orow["delay_reason"] if orow["delay_reason"] != "None" else None,
+                "delay_departure_min": orow.calc_delay_departure,
+                "passenger_density": getattr(orow, "passenger_density", None) or None,
+                "weather": getattr(orow, "weather", None) or None,
+                "delay_reason": orow.delay_reason if orow.delay_reason != "None" else None,
             })
             if len(history_dicts) >= CHUNK_SIZE:
                 db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
-                db.commit()
+                chunks_since_commit += 1
+                if chunks_since_commit >= COMMIT_EVERY_N_CHUNKS:
+                    db.commit()
+                    chunks_since_commit = 0
                 history_inserted += len(history_dicts)
                 print(f"  train_schedule_history: {history_inserted}/{len(ops_df) - dropped} inserted...", end="\r")
                 history_dicts = []
@@ -288,7 +320,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             # 2. Canonical timetable slot - overwritten as we go, sorted
             # chronologically, so whatever's left in the dict at the end
             # is each slot's MOST RECENT occurrence.
-            delay_minutes = int(round(delay_arrival))
             timetable_by_slot[(train.id, db_station.id, day_type)] = {
                 "train_id": train.id,
                 "station_id": db_station.id,
@@ -297,15 +328,15 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                 "platform_number": (station_sequence % 2) + 1,
                 "station_sequence": station_sequence,
                 "day_type": day_type,
-                "is_peak_hour": bool(is_peak),
-                "frequency_minutes": 5 if is_peak else 12,
-                "delay_minutes": delay_minutes,
-                "status": ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
+                "is_peak_hour": bool(orow.calc_is_peak),
+                "frequency_minutes": 5 if orow.calc_is_peak else 12,
+                "delay_minutes": orow.calc_delay_minutes,
+                "status": orow.calc_status,
             }
         if history_dicts:
             db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
-            db.commit()
             history_inserted += len(history_dicts)
+        db.commit()
         if dropped:
             print(f"\ntrain_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
         print(f"  train_schedule_history: {history_inserted} inserted (done).")
@@ -313,7 +344,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         timetable_dicts = list(timetable_by_slot.values())
         for i in range(0, len(timetable_dicts), CHUNK_SIZE):
             db.bulk_insert_mappings(TrainSchedule, timetable_dicts[i:i + CHUNK_SIZE])
-            db.commit()
+        db.commit()
         print(f"  train_schedules: {len(timetable_dicts)} canonical slots inserted "
               f"(collapsed from {history_inserted} historical rows).")
 
@@ -337,7 +368,28 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.add_all(crowd_rows)
         db.flush()
         if live_state_rows:
-            db.bulk_insert_mappings(StationCrowdState, live_state_rows)
+            # UPSERT instead of a plain bulk INSERT: the crowd simulator
+            # (app/simulator/csv_replay_simulator.py, started from
+            # app/main.py's lifespan) and crowd_service.py both write to
+            # this same "one row per station" live table via
+            # INSERT ... ON CONFLICT DO UPDATE. If the API server is
+            # running (and therefore the simulator is ticking) while this
+            # seed script runs, a tick can land between our TRUNCATE and
+            # this insert and create a row for some station_id first -
+            # which made a plain bulk_insert_mappings() blow up with a
+            # UniqueViolation on station_crowd_state_pkey. Matching the
+            # simulator's own upsert pattern here makes seeding safe
+            # regardless of whether anything else happens to be writing
+            # to this table at the same time.
+            stmt = pg_insert(StationCrowdState).values(live_state_rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[StationCrowdState.station_id],
+                set_={
+                    "current_count": stmt.excluded.current_count,
+                    "crowd_level": stmt.excluded.crowd_level,
+                },
+            )
+            db.execute(stmt)
 
         db.commit()
         print(
