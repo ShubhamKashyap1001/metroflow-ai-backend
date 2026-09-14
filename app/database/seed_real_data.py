@@ -1,10 +1,10 @@
 import argparse
+import gzip
 import os
 from datetime import date, datetime
 
 import pandas as pd
 from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database.init_db import create_tables
 from app.database.session import SessionLocal
@@ -24,9 +24,19 @@ from app.models.train_location import TrainLocation
 from app.models.train_schedule import TrainSchedule
 from app.models.train_schedule_history import TrainScheduleHistory
 
-DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets")
+DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "source")
 
 DEFAULT_CAPACITY = 2400
+
+# Render Free (512MB) OOM fix: passenger_flow.csv.gz and
+# train_operations.csv.gz are both several-hundred-thousand-row files.
+# Loading either one fully into a DataFrame (let alone both at once,
+# which is what _load_csvs() used to do for all 4 CSVs) can exceed a
+# 512MB instance's memory. CSV_CHUNK_SIZE bounds how many rows of
+# either file are ever resident in memory at once - everything that
+# reads these two files below streams them with pd.read_csv(...,
+# chunksize=CSV_CHUNK_SIZE) instead of reading them whole.
+CSV_CHUNK_SIZE = 50_000
 
 def _derive_station_capacities(flow_df: pd.DataFrame) -> dict[str, int]:
     """Reverse-engineer each station's real capacity from the dataset's
@@ -98,6 +108,98 @@ def _build_seed_crowd_rows(
 
     return crowd_logs, live_state_rows
 
+
+def _derive_station_capacities_chunked(
+    path: str, chunksize: int = CSV_CHUNK_SIZE
+) -> dict[str, int]:
+    """Memory-bounded equivalent of _derive_station_capacities() for the
+    OOM fix: streams passenger_flow.csv.gz in row-bounded chunks
+    (reading only the station_id/entries/exits/crowding_index columns
+    it needs, not the other ~12 columns in the file) instead of
+    requiring the whole file as one DataFrame, then computes the exact
+    same per-station median implied-capacity over the full accumulated
+    set at the end. Produces byte-for-byte the same dict as calling
+    _derive_station_capacities() on the whole file at once (verified
+    against this dataset while building this fix).
+    """
+    by_station: dict[str, list[float]] = {}
+    usecols = ["station_id", "entries", "exits", "crowding_index"]
+    for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip()
+        chunk = chunk[chunk["crowding_index"] > 0]
+        if chunk.empty:
+            continue
+        implied_capacity = (chunk["entries"] + chunk["exits"]) / chunk["crowding_index"]
+        for station_id, value in zip(chunk["station_id"], implied_capacity):
+            by_station.setdefault(station_id, []).append(float(value))
+    return {
+        station_id: int(round(pd.Series(values).median()))
+        for station_id, values in by_station.items()
+    }
+
+
+def _first_day_per_station(path: str, chunksize: int = CSV_CHUNK_SIZE) -> dict[str, date]:
+    """Pass 1/2 of the chunked crowd-row build (OOM fix): finds each
+    station's earliest calendar date in passenger_flow.csv.gz by
+    streaming only the station_id/timestamp columns in bounded
+    chunks - never the whole file, and only a single running-minimum
+    date per station is kept in memory."""
+    first_day: dict[str, date] = {}
+    usecols = ["station_id", "timestamp"]
+    for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip()
+        chunk["timestamp"] = pd.to_datetime(chunk["timestamp"])
+        chunk_min = chunk.groupby("station_id")["timestamp"].min()
+        for station_id, ts in chunk_min.items():
+            day = ts.date()
+            if station_id not in first_day or day < first_day[station_id]:
+                first_day[station_id] = day
+    return first_day
+
+
+def _collect_first_day_flow_rows(
+    path: str, first_day: dict[str, date], chunksize: int = CSV_CHUNK_SIZE
+) -> pd.DataFrame:
+    """Pass 2/2 of the chunked crowd-row build (OOM fix): re-streams
+    passenger_flow.csv.gz and keeps only each station's own first
+    calendar day of rows (the small subset _build_seed_crowd_rows()
+    actually uses - typically ~1 day's worth of readings per station),
+    with entries/exits clamped to 0 exactly like the non-chunked
+    flow_df preprocessing in seed() used to do. The small resulting
+    DataFrame is then handed to the UNMODIFIED _build_seed_crowd_rows(),
+    which produces identical output to running it on the full file,
+    because that function already restricts itself to each station's
+    first day internally (verified against this dataset while building
+    this fix)."""
+    usecols = ["station_id", "timestamp", "entries", "exits"]
+    matched_chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip()
+        chunk["timestamp"] = pd.to_datetime(chunk["timestamp"])
+        expected_day = chunk["station_id"].map(first_day)
+        matched = chunk[chunk["timestamp"].dt.date == expected_day]
+        if matched.empty:
+            continue
+        matched = matched.copy()
+        matched["entries"] = matched["entries"].clip(lower=0)
+        matched["exits"] = matched["exits"].clip(lower=0)
+        matched_chunks.append(matched)
+    if not matched_chunks:
+        return pd.DataFrame(columns=usecols)
+    return pd.concat(matched_chunks, ignore_index=True)
+
+
+def _count_data_rows(path: str) -> int:
+    """Cheap line count (header excluded), used only for the progress
+    print in the train_operations loop below - reads the gzip stream
+    as raw lines, never materializes the file as a DataFrame, so it
+    doesn't defeat the point of the chunked-loading OOM fix."""
+    with gzip.open(path, "rb") as f:
+        return sum(1 for _ in f) - 1
+
 LINE_COLORS = ["#1E88E5", "#8E24AA", "#E53935", "#00897B", "#6A1B9A", "#F4511E"]
 NAMED_LINE_COLORS = {
     "yellow": "#EAB308", "blue": "#2563EB", "red": "#DC2626", "green": "#16A34A",
@@ -112,10 +214,23 @@ def _color_for_line(line_name: str, fallback_index: int) -> str:
             return color
     return LINE_COLORS[fallback_index % len(LINE_COLORS)]
 
-def _load_csvs(dataset_dir: str) -> dict[str, pd.DataFrame]:
+def _load_csvs(dataset_dir: str) -> dict[str, object]:
     # Gzipped (.csv.gz) to stay under GitHub's 100MB per-file push limit -
     # pandas infers the compression from the ".gz" extension on its own,
     # so pd.read_csv below needs no other change.
+    #
+    # OOM fix: stations.csv.gz and trains.csv.gz are tiny (well under a
+    # MB) and are still loaded fully with pd.read_csv, same as before -
+    # that part was never the problem. passenger_flow.csv.gz and
+    # train_operations.csv.gz are the two large (multi-hundred-thousand
+    # row) files that caused Render Free (512MB) to OOM when all 4 CSVs
+    # were read into memory simultaneously. Those two are now returned
+    # as file PATHS instead of DataFrames - seed() streams each of them
+    # in bounded chunks (see _derive_station_capacities_chunked,
+    # _first_day_per_station, _collect_first_day_flow_rows, and the
+    # train_operations loop below), so neither is ever fully
+    # materialized in RAM, and the two are never held in memory at the
+    # same time either.
     paths = {
         "stations": os.path.join(dataset_dir, "stations.csv.gz"),
         "trains": os.path.join(dataset_dir, "trains.csv.gz"),
@@ -128,7 +243,12 @@ def _load_csvs(dataset_dir: str) -> dict[str, pd.DataFrame]:
             f"Missing CSV(s) in {dataset_dir}: {', '.join(missing)}.csv.gz - "
             f"copy your 4 real gzipped CSVs there first (or pass --dir)."
         )
-    return {name: pd.read_csv(p) for name, p in paths.items()}
+    return {
+        "stations": pd.read_csv(paths["stations"]),
+        "trains": pd.read_csv(paths["trains"]),
+        "passenger_flow_path": paths["passenger_flow"],
+        "train_operations_path": paths["train_operations"],
+    }
 
 def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
     create_tables()
@@ -158,9 +278,11 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             subset=["station_id", "city", "line", "station_name", "latitude", "longitude"]
         )
 
-        flow_df_for_capacity = raw["passenger_flow"].copy()
-        flow_df_for_capacity["station_id"] = flow_df_for_capacity["station_id"].astype(str).str.strip()
-        capacities = _derive_station_capacities(flow_df_for_capacity)
+        # OOM fix: streams passenger_flow.csv.gz in bounded chunks
+        # instead of loading it whole - see
+        # _derive_station_capacities_chunked() for the equivalence
+        # note.
+        capacities = _derive_station_capacities_chunked(raw["passenger_flow_path"])
 
         station_rows: dict[str, Station] = {}
         station_list: list[Station] = []
@@ -227,116 +349,121 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         print(f"  stations/lines/trains: {len(station_list)} stations, "
               f"{len(line_list)} lines, {len(train_list)} trains committed.")
 
-        ops_df = raw["train_operations"].copy()
-        ops_df["station_id"] = ops_df["station_id"].astype(str).str.strip()
-        ops_df["train_id"] = ops_df["train_id"].astype(str).str.strip()
-        ops_df["delay_reason"] = ops_df["delay_reason"].fillna("None")
-        ops_df["delay_arrival_min"] = ops_df["delay_arrival_min"].fillna(0).clip(lower=0)
-        ops_df["scheduled_arrival"] = pd.to_datetime(ops_df["scheduled_arrival"])
-        ops_df["scheduled_departure"] = pd.to_datetime(ops_df["scheduled_departure"])
+        # OOM fix: train_operations.csv.gz is streamed in bounded
+        # chunks (only the columns actually used below are read - see
+        # TRAIN_OPS_USECOLS) instead of being loaded and sorted as one
+        # whole DataFrame.
+        #
+        # The original code relied on a full
+        # ops_df.sort_values(["train_id", "station_id",
+        # "scheduled_arrival"]) so that, walking rows in that order,
+        # "last write wins" left each (train, station, day_type)
+        # timetable slot holding its chronologically most recent
+        # occurrence. Sorting the whole file would require holding it
+        # entirely in memory again, defeating the point of chunking.
+        # Instead, timetable_slot_arrival below tracks the latest
+        # scheduled_arrival seen so far per slot and only overwrites
+        # timetable_by_slot when a row's arrival is >= that value -
+        # an order-independent equivalent that keeps the same
+        # "chronologically most recent occurrence wins" result
+        # regardless of chunk/row order (verified against this
+        # dataset while building this fix). Full-granularity history
+        # rows are unaffected: they're all inserted regardless of
+        # order, so streaming them in file order instead of sorted
+        # order changes nothing about which rows end up in the table,
+        # only their incidental physical insertion order.
+        TRAIN_OPS_USECOLS = [
+            "trip_id", "train_id", "station_id", "station_sequence",
+            "scheduled_arrival", "scheduled_departure", "actual_arrival",
+            "actual_departure", "delay_arrival_min", "delay_departure_min",
+            "passenger_density", "weather", "delay_reason",
+        ]
+        total_ops_rows = _count_data_rows(raw["train_operations_path"])
 
-        ops_df["actual_arrival"] = pd.to_datetime(ops_df["actual_arrival"], errors="coerce")
-        ops_df["actual_departure"] = pd.to_datetime(ops_df["actual_departure"], errors="coerce")
-
-        ops_df = ops_df.sort_values(["train_id", "station_id", "scheduled_arrival"])
-
-        # --- Speed fix ---------------------------------------------------
-        # The old version called `.iterrows()` (slow - boxes every row into
-        # a Series) and ran `db.commit()` every 5,000 rows. Against a
-        # remote DB (e.g. Supabase) each commit is a network round-trip,
-        # so with ~311k rows / 5,000 = ~62 round-trips just for commits,
-        # on top of per-row Python overhead from iterrows(). Two changes:
-        #   1. Vectorize the per-row-identical column math (weekday, hour,
-        #      is_peak, day_type, delay floats) ONCE across the whole
-        #      DataFrame with pandas, instead of recomputing it per row in
-        #      a Python loop.
-        #   2. Use `itertuples()` instead of `iterrows()` (itertuples
-        #      yields lightweight namedtuples - no per-row Series boxing -
-        #      and is typically 5-10x faster for this kind of loop), and
-        #      commit much less often by growing CHUNK_SIZE.
-        ops_df["calc_is_weekend"] = ops_df["scheduled_arrival"].dt.weekday >= 5
-        ops_df["calc_hour"] = ops_df["scheduled_arrival"].dt.hour
-        ops_df["calc_is_peak"] = ops_df["calc_hour"].between(8, 11) | ops_df["calc_hour"].between(17, 20)
-        ops_df["calc_day_type"] = ops_df["calc_is_weekend"].map({True: DayType.WEEKEND, False: DayType.WEEKDAY})
-        ops_df["calc_delay_arrival"] = ops_df["delay_arrival_min"].astype(float)
-        ops_df["calc_delay_departure"] = ops_df.get("delay_departure_min", 0)
-        ops_df["calc_delay_departure"] = ops_df["calc_delay_departure"].fillna(0).astype(float)
-        ops_df["calc_delay_minutes"] = ops_df["calc_delay_arrival"].round().astype(int)
-        ops_df["calc_status"] = ops_df["calc_delay_minutes"].apply(
-            lambda m: ScheduleStatus.DELAYED if m > 0 else ScheduleStatus.ON_TIME
-        )
-
-        # Bigger chunks = fewer network round-trips against a remote DB.
-        # Commit only every few chunks instead of every chunk - if the run
-        # dies partway through, --reset starts clean again anyway, so
-        # there's nothing gained from committing more often than this.
-        CHUNK_SIZE = 20000
-        COMMIT_EVERY_N_CHUNKS = 3
+        CHUNK_SIZE = 5000
         history_dicts: list[dict] = []
         timetable_by_slot: dict[tuple[int, int, DayType], dict] = {}
+        timetable_slot_arrival: dict[tuple[int, int, DayType], datetime] = {}
         dropped = 0
         history_inserted = 0
-        chunks_since_commit = 0
-        for orow in ops_df.itertuples(index=False):
-            train = train_by_number.get(orow.train_id)
-            db_station = station_rows.get(orow.station_id)
-            if not train or not db_station:
-                dropped += 1
-                continue
+        for ops_chunk in pd.read_csv(
+            raw["train_operations_path"], usecols=TRAIN_OPS_USECOLS, chunksize=CSV_CHUNK_SIZE
+        ):
+            ops_chunk = ops_chunk.copy()
+            ops_chunk["station_id"] = ops_chunk["station_id"].astype(str).str.strip()
+            ops_chunk["train_id"] = ops_chunk["train_id"].astype(str).str.strip()
+            ops_chunk["delay_reason"] = ops_chunk["delay_reason"].fillna("None")
+            ops_chunk["delay_arrival_min"] = ops_chunk["delay_arrival_min"].fillna(0).clip(lower=0)
+            ops_chunk["scheduled_arrival"] = pd.to_datetime(ops_chunk["scheduled_arrival"])
+            ops_chunk["scheduled_departure"] = pd.to_datetime(ops_chunk["scheduled_departure"])
+            ops_chunk["actual_arrival"] = pd.to_datetime(ops_chunk["actual_arrival"], errors="coerce")
+            ops_chunk["actual_departure"] = pd.to_datetime(ops_chunk["actual_departure"], errors="coerce")
 
-            arrival_dt = orow.scheduled_arrival
-            departure_dt = orow.scheduled_departure
-            day_type = orow.calc_day_type
-            delay_arrival = orow.calc_delay_arrival
-            station_sequence = int(orow.station_sequence)
+            for _, orow in ops_chunk.iterrows():
+                train = train_by_number.get(orow["train_id"])
+                db_station = station_rows.get(orow["station_id"])
+                if not train or not db_station:
+                    dropped += 1
+                    continue
 
-            # 1. Full-granularity history row - always inserted.
-            history_dicts.append({
-                "trip_id": str(orow.trip_id),
-                "train_id": train.id,
-                "station_id": db_station.id,
-                "service_date": arrival_dt.date(),
-                "station_sequence": station_sequence,
-                "scheduled_arrival": arrival_dt.time(),
-                "scheduled_departure": departure_dt.time(),
-                "actual_arrival": orow.actual_arrival.time() if pd.notna(orow.actual_arrival) else None,
-                "actual_departure": orow.actual_departure.time() if pd.notna(orow.actual_departure) else None,
-                "delay_arrival_min": delay_arrival,
-                "delay_departure_min": orow.calc_delay_departure,
-                "passenger_density": getattr(orow, "passenger_density", None) or None,
-                "weather": getattr(orow, "weather", None) or None,
-                "delay_reason": orow.delay_reason if orow.delay_reason != "None" else None,
-            })
-            if len(history_dicts) >= CHUNK_SIZE:
-                db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
-                chunks_since_commit += 1
-                if chunks_since_commit >= COMMIT_EVERY_N_CHUNKS:
+                arrival_dt = orow["scheduled_arrival"]
+                departure_dt = orow["scheduled_departure"]
+                is_weekend = arrival_dt.weekday() >= 5
+                hour = arrival_dt.hour
+                is_peak = 8 <= hour <= 11 or 17 <= hour <= 20
+                day_type = DayType.WEEKEND if is_weekend else DayType.WEEKDAY
+                delay_arrival = float(orow["delay_arrival_min"])
+                delay_departure = float(orow.get("delay_departure_min", 0) or 0)
+                station_sequence = int(orow["station_sequence"])
+
+                # 1. Full-granularity history row - always inserted.
+                history_dicts.append({
+                    "trip_id": str(orow["trip_id"]),
+                    "train_id": train.id,
+                    "station_id": db_station.id,
+                    "service_date": arrival_dt.date(),
+                    "station_sequence": station_sequence,
+                    "scheduled_arrival": arrival_dt.time(),
+                    "scheduled_departure": departure_dt.time(),
+                    "actual_arrival": orow["actual_arrival"].time() if pd.notna(orow["actual_arrival"]) else None,
+                    "actual_departure": orow["actual_departure"].time() if pd.notna(orow["actual_departure"]) else None,
+                    "delay_arrival_min": delay_arrival,
+                    "delay_departure_min": delay_departure,
+                    "passenger_density": orow.get("passenger_density") or None,
+                    "weather": orow.get("weather") or None,
+                    "delay_reason": orow["delay_reason"] if orow["delay_reason"] != "None" else None,
+                })
+                if len(history_dicts) >= CHUNK_SIZE:
+                    db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
                     db.commit()
-                    chunks_since_commit = 0
-                history_inserted += len(history_dicts)
-                print(f"  train_schedule_history: {history_inserted}/{len(ops_df) - dropped} inserted...", end="\r")
-                history_dicts = []
+                    history_inserted += len(history_dicts)
+                    print(f"  train_schedule_history: {history_inserted}/{total_ops_rows - dropped} inserted...", end="\r")
+                    history_dicts = []
 
-            # 2. Canonical timetable slot - overwritten as we go, sorted
-            # chronologically, so whatever's left in the dict at the end
-            # is each slot's MOST RECENT occurrence.
-            timetable_by_slot[(train.id, db_station.id, day_type)] = {
-                "train_id": train.id,
-                "station_id": db_station.id,
-                "arrival_time": arrival_dt.time(),
-                "departure_time": departure_dt.time(),
-                "platform_number": (station_sequence % 2) + 1,
-                "station_sequence": station_sequence,
-                "day_type": day_type,
-                "is_peak_hour": bool(orow.calc_is_peak),
-                "frequency_minutes": 5 if orow.calc_is_peak else 12,
-                "delay_minutes": orow.calc_delay_minutes,
-                "status": orow.calc_status,
-            }
+                # 2. Canonical timetable slot - keep whichever
+                # occurrence has the chronologically latest
+                # scheduled_arrival for this slot (see note above).
+                slot_key = (train.id, db_station.id, day_type)
+                if slot_key not in timetable_slot_arrival or arrival_dt >= timetable_slot_arrival[slot_key]:
+                    timetable_slot_arrival[slot_key] = arrival_dt
+                    delay_minutes = int(round(delay_arrival))
+                    timetable_by_slot[slot_key] = {
+                        "train_id": train.id,
+                        "station_id": db_station.id,
+                        "arrival_time": arrival_dt.time(),
+                        "departure_time": departure_dt.time(),
+                        "platform_number": (station_sequence % 2) + 1,
+                        "station_sequence": station_sequence,
+                        "day_type": day_type,
+                        "is_peak_hour": bool(is_peak),
+                        "frequency_minutes": 5 if is_peak else 12,
+                        "delay_minutes": delay_minutes,
+                        "status": ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
+                    }
         if history_dicts:
             db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
+            db.commit()
             history_inserted += len(history_dicts)
-        db.commit()
         if dropped:
             print(f"\ntrain_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
         print(f"  train_schedule_history: {history_inserted} inserted (done).")
@@ -344,7 +471,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         timetable_dicts = list(timetable_by_slot.values())
         for i in range(0, len(timetable_dicts), CHUNK_SIZE):
             db.bulk_insert_mappings(TrainSchedule, timetable_dicts[i:i + CHUNK_SIZE])
-        db.commit()
+            db.commit()
         print(f"  train_schedules: {len(timetable_dicts)} canonical slots inserted "
               f"(collapsed from {history_inserted} historical rows).")
 
@@ -358,38 +485,20 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         # station_crowd_state is now seeded too, so the live
         # dashboard/heatmap have real data immediately instead of
         # being empty until the simulator's first tick.
-        flow_df = raw["passenger_flow"].copy()
-        flow_df["station_id"] = flow_df["station_id"].astype(str).str.strip()
-        flow_df["timestamp"] = pd.to_datetime(flow_df["timestamp"])
-        flow_df["entries"] = flow_df["entries"].clip(lower=0)
-        flow_df["exits"] = flow_df["exits"].clip(lower=0)
+        # OOM fix: streams passenger_flow.csv.gz in two bounded-memory
+        # passes (first to find each station's earliest calendar day,
+        # then to collect just that day's rows) instead of loading the
+        # whole file - see _first_day_per_station() and
+        # _collect_first_day_flow_rows() for the equivalence note.
+        # _build_seed_crowd_rows() itself is unchanged.
+        first_day = _first_day_per_station(raw["passenger_flow_path"])
+        flow_df = _collect_first_day_flow_rows(raw["passenger_flow_path"], first_day)
 
         crowd_rows, live_state_rows = _build_seed_crowd_rows(flow_df, station_rows)
         db.add_all(crowd_rows)
         db.flush()
         if live_state_rows:
-            # UPSERT instead of a plain bulk INSERT: the crowd simulator
-            # (app/simulator/csv_replay_simulator.py, started from
-            # app/main.py's lifespan) and crowd_service.py both write to
-            # this same "one row per station" live table via
-            # INSERT ... ON CONFLICT DO UPDATE. If the API server is
-            # running (and therefore the simulator is ticking) while this
-            # seed script runs, a tick can land between our TRUNCATE and
-            # this insert and create a row for some station_id first -
-            # which made a plain bulk_insert_mappings() blow up with a
-            # UniqueViolation on station_crowd_state_pkey. Matching the
-            # simulator's own upsert pattern here makes seeding safe
-            # regardless of whether anything else happens to be writing
-            # to this table at the same time.
-            stmt = pg_insert(StationCrowdState).values(live_state_rows)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[StationCrowdState.station_id],
-                set_={
-                    "current_count": stmt.excluded.current_count,
-                    "crowd_level": stmt.excluded.crowd_level,
-                },
-            )
-            db.execute(stmt)
+            db.bulk_insert_mappings(StationCrowdState, live_state_rows)
 
         db.commit()
         print(

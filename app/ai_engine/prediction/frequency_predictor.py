@@ -5,12 +5,10 @@ adjustment" workflow with a data-driven suggestion.
 import logging
 import os
 from datetime import datetime, timezone
-from functools import lru_cache
 
-import joblib
 import pandas as pd
 
-from app.ai_engine.model_bundle import prune_to_winner
+from app.ai_engine import model_bundle
 from app.utils.timezone import to_business_time
 
 logger = logging.getLogger(__name__)
@@ -20,17 +18,16 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "freq
 MIN_FREQUENCY = 3
 MAX_FREQUENCY = 15
 
-@lru_cache(maxsize=1)
+# Every raw input this predictor can actually compute - see
+# recommend_frequency() below. Used to validate a loaded bundle's
+# `features` list before trusting its column order (see
+# model_bundle.validate_feature_contract).
+KNOWN_FEATURES = {"station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"}
+
 def _load_model():
-    if not os.path.exists(MODEL_PATH):
-        print(f"[{__name__}] no trained model at {MODEL_PATH} - using heuristic fallback")
-        return None
-    try:
-        return prune_to_winner(joblib.load(MODEL_PATH))
-    except Exception as exc:
-                                                                     
-        print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")
-        return None
+    # See crowd_predictor._load_model - same shared, thread-safe,
+    # load-once registry (app.ai_engine.model_bundle.get_or_load).
+    return model_bundle.get_or_load("frequency", MODEL_PATH)
 
 def recommend_frequency(station_id: int, target_datetime: datetime | None = None) -> dict:
     dt = target_datetime or datetime.now(timezone.utc)
@@ -52,6 +49,9 @@ def recommend_frequency(station_id: int, target_datetime: datetime | None = None
 
     if bundle is not None:
         try:
+            model_bundle.validate_feature_contract(
+                bundle["features"], KNOWN_FEATURES, context="frequency_predictor"
+            )
             trained_name = bundle.get("model_name", "random_forest")
             candidates = bundle.get("models") or {trained_name: bundle["model"]}
             features = pd.DataFrame(

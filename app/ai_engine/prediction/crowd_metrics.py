@@ -49,11 +49,26 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "crowd_model.pkl")
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets")
+DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
 # Gzipped to stay under GitHub's 100MB file limit - pd.read_csv infers
 # the compression from the ".gz" extension, no other change needed.
+
+# MEMORY FIX: passenger_flow.csv.gz is a large production dataset (16
+# columns, ~800k rows). This module only ever needs the 7 columns
+# below, and only ever needs them reduced to a small per-(station,
+# hour, day_of_week, is_weekend, is_peak_hour) aggregate - so a plain
+# pd.read_csv(PASSENGER_FLOW_CSV) (all columns, every row materialized
+# at once) was pulling the entire wide file into RAM on every cold
+# cache miss. Read only these columns, and read them in bounded
+# chunks (see CSV_CHUNK_SIZE) that get reduced to small partial
+# aggregates immediately, so only one chunk's worth of raw rows is
+# ever resident at a time.
+PASSENGER_FLOW_USECOLS = [
+    "station_id", "hour", "day_of_week", "is_weekend", "entries", "exits", "crowding_index",
+]
+CSV_CHUNK_SIZE = 100_000
 
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 TARGET = "passenger_count"
@@ -97,6 +112,71 @@ def _station_id_map() -> dict[str, int]:
     stations["int_station_id"] = stations.index + 1
     return dict(zip(stations["station_id"], stations["int_station_id"]))
 
+def _passenger_flow_aggregates(station_id_map: dict) -> tuple[pd.DataFrame, float]:
+    """Streams passenger_flow.csv.gz in bounded chunks (CSV_CHUNK_SIZE
+    rows at a time, only PASSENGER_FLOW_USECOLS columns) and reduces
+    each chunk immediately to the two things compute_crowd_metrics()
+    actually needs:
+
+    1. `grouped` - the mean passenger_count per (station_id, hour,
+       day_of_week, is_weekend, is_peak_hour), i.e. exactly what
+       raw.groupby(FEATURES)["passenger_count"].mean()...reset_index()
+       produced before. Built incrementally via a per-chunk sum/count,
+       combined across chunks, then divided once at the end - same
+       arithmetic (mean = sum/count, rounded to int) and same sorted
+       group-key order as the original single-shot groupby, so the
+       resulting table (and therefore the train_test_split(random_state=42)
+       held-out rows built from it) is unchanged.
+    2. `implied_capacity` - the median of passenger_count/crowding_index
+       over rows with crowding_index > 0.05. Computing an exact median
+       still requires seeing every qualifying value, but only that one
+       float column is accumulated across chunks (not the whole
+       DataFrame), which is a small fraction of the file's memory
+       footprint.
+
+    Only ever holds one CSV_CHUNK_SIZE-row chunk plus these small
+    running aggregates in memory - never the full dataset.
+    """
+    partial_group_sums: list[pd.DataFrame] = []
+    capacity_ratio_chunks: list[np.ndarray] = []
+
+    for chunk in pd.read_csv(PASSENGER_FLOW_CSV, usecols=PASSENGER_FLOW_USECOLS, chunksize=CSV_CHUNK_SIZE):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip().map(station_id_map)
+        chunk = chunk.dropna(subset=["station_id"])
+        chunk["station_id"] = chunk["station_id"].astype(int)
+        chunk["entries"] = chunk["entries"].clip(lower=0)
+        chunk["exits"] = chunk["exits"].clip(lower=0)
+        chunk["passenger_count"] = chunk["entries"] + chunk["exits"]
+        chunk["is_peak_hour"] = ((chunk["hour"].between(8, 11)) | (chunk["hour"].between(17, 20))).astype(int)
+
+        idx_mask = chunk["crowding_index"] > 0.05
+        if idx_mask.any():
+            capacity_ratio_chunks.append(
+                (chunk.loc[idx_mask, "passenger_count"] / chunk.loc[idx_mask, "crowding_index"]).to_numpy()
+            )
+
+        chunk_grouped = (
+            chunk.groupby(FEATURES)["passenger_count"].agg(["sum", "count"]).reset_index()
+        )
+        partial_group_sums.append(chunk_grouped)
+
+    if partial_group_sums:
+        combined = pd.concat(partial_group_sums, ignore_index=True)
+        combined = combined.groupby(FEATURES)[["sum", "count"]].sum().reset_index()
+        combined["passenger_count"] = (combined["sum"] / combined["count"]).round().astype(int)
+        grouped = combined[FEATURES + ["passenger_count"]].sort_values(FEATURES).reset_index(drop=True)
+    else:
+        grouped = pd.DataFrame(columns=FEATURES + ["passenger_count"])
+
+    if capacity_ratio_chunks:
+        implied_capacity = float(np.median(np.concatenate(capacity_ratio_chunks)))
+    else:
+        implied_capacity = float("nan")
+
+    return grouped, implied_capacity
+
+
 def _load_model():
     if not os.path.exists(MODEL_PATH):
         return None
@@ -124,7 +204,17 @@ def _unavailable() -> dict:
         "models": {},
     }
 
-DISPLAY_NAMES = {"random_forest": "Random Forest", "xgboost": "XGBoost"}
+DISPLAY_NAMES = {
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+    # Current production artifacts (Sept 2026 retrain) suffix the
+    # winning candidate name with "_tuned" (see colab_training/
+    # train_metroflow_models_colab.ipynb) - map those too so the
+    # dashboard still shows a friendly label instead of the raw
+    # internal model_name string.
+    "random_forest_tuned": "Random Forest",
+    "xgboost_tuned": "XGBoost",
+}
 
 def _evaluate_one(model, model_features, X_test, y_test_arr, implied_capacity, trained_rows) -> dict:
     """Same evaluation _compute_crowd_metrics used to do for a single
@@ -198,22 +288,7 @@ def compute_crowd_metrics() -> dict:
 
         station_id_map = _station_id_map()
 
-        raw = pd.read_csv(PASSENGER_FLOW_CSV)
-        raw["station_id"] = raw["station_id"].astype(str).str.strip().map(station_id_map)
-        raw = raw.dropna(subset=["station_id"])
-        raw["station_id"] = raw["station_id"].astype(int)
-        raw["entries"] = raw["entries"].clip(lower=0)
-        raw["exits"] = raw["exits"].clip(lower=0)
-        raw["passenger_count"] = raw["entries"] + raw["exits"]
-        raw["is_peak_hour"] = ((raw["hour"].between(8, 11)) | (raw["hour"].between(17, 20))).astype(int)
-
-        idx_mask = raw["crowding_index"] > 0.05
-        implied_capacity = float((raw.loc[idx_mask, "passenger_count"] / raw.loc[idx_mask, "crowding_index"]).median())
-
-        grouped = (
-            raw.groupby(["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"])
-            ["passenger_count"].mean().round().astype(int).reset_index()
-        )
+        grouped, implied_capacity = _passenger_flow_aggregates(station_id_map)
 
         X = grouped[FEATURES]
         y = grouped[TARGET]
@@ -229,8 +304,26 @@ def compute_crowd_metrics() -> dict:
             evaluated["model_name"] = DISPLAY_NAMES.get(name, name)
             models_out[name] = evaluated
 
-        best = models_out.get(trained_name) or next(iter(models_out.values()))
-        display_name = DISPLAY_NAMES.get(trained_name, trained_name)
+        # Bug fix: `trained_name` is whatever colab_training picked as the
+        # winner using ITS OWN dataset build/test split at training time.
+        # models_out above is a fresh, independent re-evaluation (this
+        # module's own dataset build + train_test_split(random_state=42)) -
+        # normally identical, but the two can disagree (different data
+        # snapshot since training, a chunked-vs-single-shot aggregation
+        # rounding difference, etc). Trusting the stale `trained_name` in
+        # that case shows an "Active" badge on a candidate whose own MAE/R2
+        # displayed right next to it is visibly worse than the other card -
+        # exactly the mismatch this fixes. Pick the winner from the live
+        # numbers actually being displayed instead, so the badge always
+        # matches what's on screen; still fall back to `trained_name` (then
+        # the first candidate) if MAE is missing for every candidate.
+        scored = [(name, m) for name, m in models_out.items() if m.get("mae") is not None]
+        if scored:
+            winner_name, best = min(scored, key=lambda item: item[1]["mae"])
+        else:
+            winner_name = trained_name
+            best = models_out.get(trained_name) or next(iter(models_out.values()))
+        display_name = DISPLAY_NAMES.get(winner_name, winner_name)
 
         return {
             "available": True,

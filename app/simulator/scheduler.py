@@ -14,7 +14,7 @@ _retention_election: LeaderElection | None = None
 _notification_bin_retention_election: LeaderElection | None = None
 
 
-def start_simulator(session_factory, interval_seconds: int = 5) -> None:
+def start_simulator(session_factory, interval_seconds: int = 60) -> None:
     global _crowd_election
     if _crowd_election is None:
         _crowd_election = LeaderElection(
@@ -29,7 +29,7 @@ async def stop_simulator() -> None:
         election, _crowd_election = _crowd_election, None
         await election.stop()
 
-def start_train_tracker(session_factory, interval_seconds: int = 5) -> None:
+def start_train_tracker(session_factory, interval_seconds: int = 60) -> None:
     global _train_election
     if _train_election is None:
         _train_election = LeaderElection(

@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.rate_limit import _rate_limit_exceeded_handler_with_retry_after
+from app.core.request_limits import MaxBodySizeMiddleware
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 logger = logging.getLogger(__name__)
@@ -108,11 +109,10 @@ async def lifespan(app: FastAPI):
             resumed,
         )
 
-    tick = settings.SIMULATOR_INTERVAL_SECONDS
     if settings.ENABLE_SIMULATOR:
-        start_simulator(SessionLocal, tick)
+        start_simulator(SessionLocal, settings.SIMULATOR_INTERVAL_SECONDS)
     if settings.ENABLE_TRAIN_TRACKING:
-        start_train_tracker(SessionLocal, tick)
+        start_train_tracker(SessionLocal, settings.TRAIN_TRACK_INTERVAL_SECONDS)
     if settings.ENABLE_CROWD_RETENTION_JOB:
         start_retention_job(SessionLocal, settings.CROWD_RETENTION_INTERVAL_SECONDS)
     if settings.ENABLE_NOTIFICATION_BIN_RETENTION_JOB:
@@ -239,6 +239,13 @@ async def metrics_middleware(request: Request, call_next):
             method=request.method, route=route
         ).observe(duration_seconds)
 
+# Registered LAST (= outermost layer, runs FIRST on every incoming
+# request) so an oversized body is rejected before CORS, rate
+# limiting, or the metrics middleware above ever touch it - see
+# app/core/request_limits.py. Only wraps "http" scope requests;
+# "/ws/monitor" (a WebSocket route) is unaffected.
+app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.MAX_REQUEST_BODY_BYTES)
+
 @app.get("/metrics", include_in_schema=False)
 def metrics_endpoint():
     """Prometheus scrape target - no auth, same as /health, matching
@@ -330,11 +337,19 @@ async def websocket_monitor(websocket: WebSocket):
         finally:
             db.close()
 
-    await manager.connect(
+    accepted = await manager.connect(
         websocket,
         user_id=str(user.id) if user else None,
         subprotocol=accepted_subprotocol,
     )
+    if not accepted:
+        # Over WS_MAX_CONNECTIONS/WS_MAX_CONNECTIONS_PER_USER - the
+        # socket has already been closed (WS close code 1013, "try
+        # again later") by manager.connect()/_reject() without ever
+        # being accept()ed or registered anywhere, so there's nothing
+        # more to do here. Every already-connected client is
+        # unaffected.
+        return
     # Labels the eventual manager.disconnect() call below for
     # ws_disconnects_total (see app/core/metrics.py) - purely
     # observational, doesn't change which exceptions are caught or

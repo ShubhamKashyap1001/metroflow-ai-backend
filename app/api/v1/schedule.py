@@ -59,6 +59,17 @@ def delayed_schedules(
     """Delay handling: currently delayed schedule entries."""
     return schedule_service.delayed_schedules(db, station_id, state, limit, offset)
 
+@router.get("/delayed/count")
+def delayed_schedules_count(
+    station_id: int | None = None,
+    state: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Lightweight counterpart to /delayed - total count of currently
+    delayed schedules (same filters), for the dashboard's Recent Alerts
+    widget, which only needs the number rather than the capped list."""
+    return {"count": schedule_service.delayed_schedules_count(db, station_id, state)}
+
 @router.get("/upcoming")
 def upcoming_schedules(
     state: str | None = None,

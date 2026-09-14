@@ -169,12 +169,28 @@ def recover_pending_jobs() -> int:
     finally:
         db.close()
 
-    for job_id in resumable_ids:
-        logger.warning(
-            "Resuming notification dispatch job %s left queued/in-progress by a "
-            "previous process (restart recovery).",
-            job_id,
+    if resumable_ids:
+        # One aggregate line instead of one logger.warning() per job -
+        # app/main.py's lifespan already logs the resumed count on its
+        # own line, so this only needs to add the actual IDs for
+        # debugging, capped so a large backlog after a crash can't turn
+        # startup into one log line per row.
+        _MAX_IDS_LOGGED = 20
+        shown = resumable_ids[:_MAX_IDS_LOGGED]
+        suffix = (
+            f" (+{len(resumable_ids) - _MAX_IDS_LOGGED} more)"
+            if len(resumable_ids) > _MAX_IDS_LOGGED
+            else ""
         )
+        logger.warning(
+            "Resuming %d notification dispatch job(s) left queued/in-progress "
+            "by a previous process (restart recovery): %s%s",
+            len(resumable_ids),
+            shown,
+            suffix,
+        )
+
+    for job_id in resumable_ids:
         notification_executor.submit(run_job, job_id)
 
     return len(resumable_ids)

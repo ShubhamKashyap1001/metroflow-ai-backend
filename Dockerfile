@@ -31,11 +31,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /install /usr/local
 
-# Copy the whole backend repo, preserving the app/ + datasets/ layout
-# the code expects at runtime (see app/simulator/csv_replay_simulator.py
-# and app/ai_engine/saved_models/*.pkl, both referenced via relative
-# paths from inside app/).
-COPY . .
+# Copy only what the production runtime actually needs, instead of
+# blindly `COPY . .`-ing the whole repo (tests/, docs/, postman/,
+# colab_training/, datasets/ml/ training data, etc. never need to be
+# in the image - see .dockerignore for the full exclusion list and the
+# reasoning). Each path below is preserved at the SAME relative
+# location under WORKDIR /app that the code already expects:
+#   - app/                     -> app code + app/ai_engine/saved_models/*.pkl
+#                                  (crowd_model.pkl, delay_model.pkl,
+#                                  frequency_model.pkl - loaded via
+#                                  paths relative to app/ai_engine/prediction/)
+#   - datasets/source/         -> the 4 real source CSV.gz files the
+#                                  simulator (csv_replay_simulator.py),
+#                                  seed_real_data.py, and the
+#                                  crowd/delay/frequency metrics modules
+#                                  read via ../../datasets/source-style
+#                                  relative paths. datasets/ml/ (training-
+#                                  only datasets) is intentionally NOT
+#                                  copied - nothing under app/ reads it.
+#   - migrations/ + alembic.ini -> needed for `alembic upgrade head`,
+#                                  which both docker-compose.yml and
+#                                  Render's Pre-Deploy Command run
+#                                  against this same image before the
+#                                  app starts serving traffic.
+# requirements.txt is deliberately NOT copied here - dependencies are
+# already installed into /usr/local from the builder stage above, so
+# it's not read by anything at runtime.
+COPY app/ ./app/
+COPY datasets/source/ ./datasets/source/
+COPY migrations/ ./migrations/
+COPY alembic.ini ./alembic.ini
 
 # Run as a non-root user.
 RUN useradd --create-home --shell /bin/bash appuser \

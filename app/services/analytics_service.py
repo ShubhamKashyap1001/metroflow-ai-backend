@@ -1,8 +1,7 @@
 
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.crowd_log import CrowdLog
@@ -11,6 +10,7 @@ from app.models.metro_line import MetroLine
 from app.models.prediction import Prediction
 from app.models.station import Station
 from app.models.train_schedule import TrainSchedule
+from app.services.crowd_service import crowd_flow_aggregate
 from app.utils.geo import cities_for_state
 
 # Phase 9: prediction_insights already took a `limit` query param, but
@@ -26,14 +26,21 @@ MAX_PREDICTION_INSIGHTS_LIMIT = 200
 # window with no upper bound, then run `since = now - timedelta(hours=
 # hours)` straight into a crowd_logs query. An oversized value (e.g.
 # ?hours=87600000) degrades into scanning/aggregating the ENTIRE
-# ever-growing crowd_logs table - passenger_flow_overview is the worse
-# of the two, since it pulls raw per-row CrowdLog data with `.all()`
-# (no limit at all) rather than aggregating in SQL. Same class of
-# problem Phase 9 already fixed for prediction_insights above, just
-# reached via a time filter instead of a raw limit. The frontend never
-# asks for more than 72h (see ReportsPanel.tsx's WINDOW_OPTIONS), so
-# this cap is far above any real usage and purely a server-side
-# backstop.
+# ever-growing crowd_logs table. Same class of problem Phase 9 already
+# fixed for prediction_insights above, just reached via a time filter
+# instead of a raw limit. The frontend never asks for more than 72h
+# (see ReportsPanel.tsx's WINDOW_OPTIONS), so this cap is far above any
+# real usage and purely a server-side backstop.
+#
+# RAM FIX (Render Free 512MB): this window cap alone still let a
+# request for the maximum allowed range pull a huge number of raw rows
+# into Python (previously true for passenger_flow_overview, which
+# pulled raw per-row CrowdLog data with `.all()` rather than
+# aggregating in SQL). It now delegates to
+# crowd_service.crowd_flow_aggregate(), which does the per-station
+# delta/sum work in SQL and returns one row per station regardless of
+# how many raw samples exist in the window - see that function's
+# docstring.
 MAX_HISTORY_WINDOW_HOURS = 720  # 30 days
 
 def _clamp_hours(hours: float) -> float:
@@ -160,6 +167,15 @@ def passenger_flow_overview(
     the total at all, so the KPI cards and chart looked frozen even
     though fresh data was arriving continuously. A short window makes
     each new sample a visible fraction of the total instead.
+
+    RAM FIX (Render Free 512MB): entries/exits/last-known-count per
+    station are now computed by crowd_service.crowd_flow_aggregate() -
+    a single SQL window-function + GROUP BY query that returns at most
+    one aggregated row per station - instead of pulling every raw
+    CrowdLog row in the window into Python and walking it with a
+    running-previous-count loop. Same source data, same per-station
+    delta definition, same totals; see that function's docstring for
+    why the two are numerically equivalent.
     """
     hours = _clamp_hours(hours)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -177,28 +193,18 @@ def passenger_flow_overview(
 
     station_ids = [s.id for s in stations]
 
-    logs = (
-        db.query(CrowdLog.station_id, CrowdLog.current_count, CrowdLog.created_at)
-        .filter(CrowdLog.station_id.in_(station_ids), CrowdLog.created_at >= since)
-        .order_by(CrowdLog.station_id, CrowdLog.created_at.asc())
-        .all()
-    )
-
-    entries_by_station: dict[int, int] = defaultdict(int)
-    exits_by_station: dict[int, int] = defaultdict(int)
-    last_count_by_station: dict[int, int] = {}
-    previous_count: dict[int, int] = {}
-
-    for log in logs:
-        prev = previous_count.get(log.station_id)
-        if prev is not None:
-            delta = log.current_count - prev
-            if delta > 0:
-                entries_by_station[log.station_id] += delta
-            elif delta < 0:
-                exits_by_station[log.station_id] += abs(delta)
-        previous_count[log.station_id] = log.current_count
-        last_count_by_station[log.station_id] = log.current_count
+    flow = crowd_flow_aggregate(db, station_ids, since)
+    entries_by_station: dict[int, int] = {
+        sid: values["inflow"] for sid, values in flow.items() if values["inflow"]
+    }
+    exits_by_station: dict[int, int] = {
+        sid: values["outflow"] for sid, values in flow.items() if values["outflow"]
+    }
+    last_count_by_station: dict[int, int] = {
+        sid: values["last_count"]
+        for sid, values in flow.items()
+        if values["last_count"] is not None
+    }
 
     total_inflow = sum(entries_by_station.values())
     total_outflow = sum(exits_by_station.values())

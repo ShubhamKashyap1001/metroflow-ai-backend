@@ -1,37 +1,13 @@
-"""Milestone 2 - AI Prediction Module: delay prediction inference.
 
-Supports the 8-feature delay_model.pkl (adds capacity_passengers and
-train_age_days on top of the original 6). Both are sourced from real
-data, never invented:
-
-  capacity_passengers -> Train.capacity, a real per-train DB column
-                          seeded straight from trains.csv's
-                          capacity_passengers (2nd-generation dataset:
-                          real values from 974-1284, not a uniform
-                          guess). If a specific train_id is given,
-                          that train's own capacity is used;
-                          otherwise the real average across active
-                          trains is used.
-
-  train_age_days       -> Train.commissioned_date, a real per-train DB
-                          column seeded straight from trains.csv's
-                          commissioned_date. train_age_days =
-                          (today - commissioned_date).days. This
-                          dataset generation has no separate sensor
-                          CSV, so this is now a direct DB read, not an
-                          estimate from a replay cache.
-"""
 import logging
 import os
 import time as _time
 from datetime import datetime, timezone
-from functools import lru_cache
 
-import joblib
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from app.ai_engine.model_bundle import prune_to_winner
+from app.ai_engine import model_bundle
 from app.ai_engine.prediction.crowd_predictor import predict_crowd
 from app.core import cache
 from app.models.train import Train
@@ -41,42 +17,21 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
 
-@lru_cache(maxsize=1)
-def _load_model():
-    if not os.path.exists(MODEL_PATH):
-        print(f"[{__name__}] no trained model at {MODEL_PATH} - using heuristic fallback")
-        return None
-    try:
-        return prune_to_winner(joblib.load(MODEL_PATH))
-    except Exception as exc:
-                                                                     
-        print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")
-        return None
+# Every raw input name this predictor knows how to compute a value for
+# (see the `row_values` mapping built in predict_delay() below - this
+# is exactly its key set). Used to validate a loaded bundle's
+# `features` list before trusting its column order (see
+# model_bundle.validate_feature_contract).
+KNOWN_FEATURES = {
+    "station_id", "station_code", "hour", "day_of_week", "is_weekend",
+    "is_peak_hour", "passenger_count", "capacity_passengers",
+    "train_age_days", "train_age_years", "weather_code",
+}
 
-# BUGFIX (remaining N+1 query): predict_delay(db, ..., train_id=None) -
-# the path every call in prediction_service.smart_recommendations_bulk
-# takes, since that loop never has a specific train in mind, just a
-# station - used to run TWO separate `SELECT ... FROM trains WHERE
-# is_active` scans on EVERY call (one in _real_capacity_passengers, one
-# in _real_train_age_days), each recomputing the exact same fleet-wide
-# average from scratch. smart_recommendations_bulk calls this once per
-# station in its loop (up to MAX_BULK_RECOMMENDATION_STATIONS=30), so
-# a single dashboard refresh - or the live WebSocket-triggered refresh
-# firing roughly every SIMULATOR_INTERVAL_SECONDS - could issue up to
-# 60 redundant full-table scans of `trains` computing the IDENTICAL
-# two numbers over and over, once per station, instead of once per
-# request.
-#
-# Fixed the same way train_tracking.py's route cache already fixes the
-# identical class of problem for schedules: a single combined query
-# (one SELECT for both columns instead of two) whose result - the
-# fleet-wide (avg_capacity, avg_age_days) pair - is cached for
-# FLEET_STATS_CACHE_TTL_SECONDS (Redis-backed, with a short process-
-# local fallback so a cache-miss burst within the same process doesn't
-# all fall through to Postgres at once). This data only changes when a
-# train is added/retired or ages by a day, so a short TTL costs
-# nothing in freshness while collapsing N per-station queries into at
-# most one per cache window.
+def _load_model():
+
+    return model_bundle.get_or_load("delay", MODEL_PATH)
+
 FLEET_STATS_CACHE_TTL_SECONDS = 300
 _FLEET_STATS_CACHE_KEY = "predict:delay:fleet-stats"
 _fleet_stats_local: tuple[float, float] | None = None
@@ -99,11 +54,6 @@ def _compute_fleet_stats(db: Session) -> tuple[float, float]:
     capacities = [c for c, _ in rows if c is not None]
     avg_capacity = sum(capacities) / len(capacities) if capacities else 1200.0
 
-    # BUGFIX (naive datetime / timezone handling): `date.today()` reads
-    # the naive server-local clock, which can disagree with the app's
-    # configured business timezone (and drifts the computed age by a
-    # day right around midnight, depending on what timezone the
-    # process happens to run in). See app/utils/timezone.py.
     today = business_today()
     ages = [(today - commissioned).days for _, commissioned in rows if commissioned is not None]
     avg_age_days = sum(ages) / len(ages) if ages else 0.0
@@ -206,6 +156,9 @@ def predict_delay(
 
     if bundle is not None:
         try:
+            model_bundle.validate_feature_contract(
+                bundle["features"], KNOWN_FEATURES, context="delay_predictor"
+            )
             trained_name = bundle.get("model_name", "random_forest")
             candidates = bundle.get("models") or {trained_name: bundle["model"]}
             train_age_days = _real_train_age_days(db, train_id)

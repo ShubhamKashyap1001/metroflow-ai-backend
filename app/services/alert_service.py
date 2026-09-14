@@ -283,8 +283,19 @@ def _dispatch(
         alert_message = alert.message
         alert_created_at = alert.created_at.isoformat()
 
-        active_users = (
-            db1.query(UserProfile)
+        # RAM FIX (Render Free 512MB): this used to pull full UserProfile
+        # ORM rows (id, email, full_name, username, phone, avatar_url,
+        # role, is_active, timestamps) for every active real user just
+        # to read two columns off each one below - on a deployment with
+        # a large passenger base this is real per-broadcast memory that
+        # scales with the whole user table, not with anything about the
+        # alert itself, and every alert create/resolve re-runs it.
+        # Selecting only (email, phone) keeps the exact same recipient
+        # set (same filter, same rows) while avoiding hydrating a full
+        # ORM instance - and every column that's still an inflated
+        # Python object either way - per active user.
+        active_user_rows = (
+            db1.query(UserProfile.email, UserProfile.phone)
             .filter(
                 UserProfile.is_active.is_(True),
                 or_(
@@ -296,10 +307,10 @@ def _dispatch(
         )
         creator = db1.get(UserProfile, created_by_id) if created_by_id else None
 
-        emails = {u.email for u in active_users if u.email}
+        emails = {email for email, _phone in active_user_rows if email}
         if creator and creator.email:
             emails.add(creator.email)
-        phones = {u.phone for u in active_users if u.phone}
+        phones = {phone for _email, phone in active_user_rows if phone}
         if creator and creator.phone:
             phones.add(creator.phone)
 

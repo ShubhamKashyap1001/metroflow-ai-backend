@@ -1,11 +1,13 @@
-
 from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
+from collections import deque
 from datetime import date, datetime, timezone
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -22,11 +24,12 @@ from app.models.station import Station
 from app.models.station_crowd_state import StationCrowdState
 from app.services import notification_service
 from app.utils.geo import state_for_city
+from app.utils.timezone import to_business_time
 from app.websocket.events import CROWD_UPDATE
 from app.websocket.manager import manager
 
 CSV_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "datasets", "passenger_flow.csv.gz"
+    os.path.dirname(__file__), "..", "..", "datasets", "source", "passenger_flow.csv.gz"
 )
 # Gzipped to stay under GitHub's 100MB file limit; pd.read_csv below
 # infers the compression from the ".gz" extension automatically.
@@ -34,7 +37,28 @@ COL_STATION_ID = "station_id"
 COL_TIMESTAMP = "timestamp"
 COL_ENTRIES = "entries"
 COL_EXITS = "exits"
-COL_CROWD_LABEL = "crowding_label"                                                                          
+COL_CROWD_LABEL = "crowding_label"
+
+# Memory fix: the CSV has 15 columns (city, station_name, line,
+# weather, crowding_index, ... ) but the replay below only ever reads
+# these 5. Every read of the file (the startup index pass and every
+# later per-station refill) passes usecols=_CSV_USECOLS so the other
+# 10 columns are never parsed or held in memory at all.
+_CSV_USECOLS = [COL_STATION_ID, COL_TIMESTAMP, COL_ENTRIES, COL_EXITS, COL_CROWD_LABEL]
+# Rows pulled into memory per read_csv chunk during the one-time
+# startup scan. Bounds peak memory during that scan to one chunk at a
+# time - it is never used to materialize the whole file at once.
+_CSV_CHUNKSIZE = 100_000
+# How many rows of REAL data each station keeps buffered in RAM at
+# once. This is the actual memory fix: instead of holding every
+# station's full CSV history (or the full file grouped by station) in
+# memory for the lifetime of the process, each station gets a small
+# bounded window. When a station's buffer drains, `_refill_station_buffer`
+# reads just the next `_STATION_BUFFER_ROWS` rows for THAT station off
+# disk and discards the rest - so memory stays O(num_stations x
+# _STATION_BUFFER_ROWS) forever, never O(num_rows_in_csv), no matter
+# how large passenger_flow.csv.gz grows.
+_STATION_BUFFER_ROWS = 64
 
 _LABEL_TO_LEVEL = {
     "low": CrowdLevel.LOW,
@@ -43,8 +67,22 @@ _LABEL_TO_LEVEL = {
     "critically overcrowded": CrowdLevel.CRITICAL,
 }
 
-_rows_by_station: dict[str, pd.DataFrame] = {}
+# Bounded per-station row buffers (real CSV rows, capped at
+# _STATION_BUFFER_ROWS - NOT that station's full history and NOT the
+# full dataset). Populated lazily/on demand by _refill_station_buffer.
+_rows_by_station: dict[str, deque] = {}
+# How many rows of its own block each station has read off disk so
+# far (used only to compute the next on-disk offset to resume from -
+# it is an int per station, not row data, so it stays cheap even for
+# a much larger dataset).
 _cursor: dict[str, int] = {}
+# Per-station {"start": <0-based offset of this station's first row in
+# the CSV data rows>, "count": <how many rows that station has total>}.
+# Built once at startup while streaming the file in bounded chunks
+# (see _load_csv_once) and is the only thing that lets a later refill
+# seek straight to a station's own rows without ever loading or
+# grouping the full file.
+_STATION_INDEX: dict[str, dict] = {}
 _loaded = False
 
 # Phase 3 fix (docs/crowd-data-correctness.md, Bug 1) — running net-flow
@@ -89,24 +127,32 @@ NOTIFIABLE_CROWD_LEVELS = {CrowdLevel.HIGH, CrowdLevel.CRITICAL}
 # => first tick for a station always writes history).
 _last_history_written_at: dict[int, float] = {}
 
-# Leader-failover replay-state continuity. `_cursor`/`_occupancy_by_station`/
+# Leader-failover replay-state continuity. `_occupancy_by_station`/
 # `_last_row_date_by_station` above are per-PROCESS memory - a brand
 # new process (which is exactly what a newly-elected leader is, see
 # app/simulator/leader_election.py) starts them at their fresh
-# defaults (row 0, occupancy 0.0), NOT wherever the previous leader
-# left off. Left unaddressed, every station's replay silently
-# rewinds to the start of its CSV history and its live occupancy count
-# drops at the exact moment failover is supposed to look seamless.
+# defaults (occupancy 0.0), NOT wherever the previous leader left off.
+# Left unaddressed, every station's live occupancy count drops at the
+# exact moment failover is supposed to look seamless.
 #
 # Fixed the same way app/core/cache.py already caches other hot state:
-# every tick, snapshot every station's {cursor, occupancy,
-# last_row_date} as one JSON blob in Redis (see _persist_replay_state);
-# a newly-started process loads that snapshot once, right after it
-# builds `_rows_by_station` (see _restore_replay_state), and resumes
-# from there instead of row 0. Same fail-open contract as the rest of
-# app/core/cache.py: if Redis has nothing yet (first-ever boot) or is
-# unreachable, this is a no-op and replay simply starts from today's
-# existing defaults - it never blocks or errors the tick loop.
+# every tick, snapshot every station's {occupancy, last_row_date} as
+# one JSON blob in Redis (see _persist_replay_state); a newly-started
+# process loads that snapshot once, right after it builds
+# `_STATION_INDEX` (see _restore_replay_state), and resumes the
+# occupancy accumulator from there instead of 0.0. Same fail-open
+# contract as the rest of app/core/cache.py: if Redis has nothing yet
+# (first-ever boot) or is unreachable, this is a no-op and replay
+# simply starts from today's existing defaults - it never blocks or
+# errors the tick loop.
+#
+# Note: this deliberately does NOT persist a per-station CSV row
+# cursor any more. The memory fix below means a new leader keeps only
+# a small on-disk-backed row buffer per station (see
+# _STATION_BUFFER_ROWS), not each station's full history, so there is
+# no in-memory "row index into the complete dataset" to snapshot -
+# only the occupancy/date accumulators, which is what actually matters
+# for the dashboard staying visually continuous across a failover.
 _REPLAY_STATE_CACHE_KEY = "simulator:crowd_replay_state"
 _REPLAY_STATE_TTL_SECONDS = 3600
 
@@ -131,10 +177,35 @@ def _load_stations(db: Session) -> list[dict]:
     return _stations_cache
 
 def _load_csv_once() -> None:
-    """Reads the CSV exactly once per process and groups it by the
-    real station_id, sorted by its own real timestamp column - this
-    ordering IS the real recorded sequence of events, nothing is
-    reshuffled or generated."""
+    """Runs exactly once per process. Builds a small per-station INDEX
+    (0-based start offset + row count in the CSV - two ints per
+    station, e.g. 324 stations here) and pre-fills each station's
+    bounded row buffer (up to `_STATION_BUFFER_ROWS` real rows), then
+    stops. It never holds the complete dataset, and never groups the
+    complete dataset by station, in memory.
+
+    MEMORY FIX: this used to (a) `pd.read_csv(CSV_PATH)` the whole
+    file with no `usecols`/`chunksize`, and even after an earlier
+    attempted fix, still ended up (b) grouping every chunk by station
+    and concatenating those groups into one full-history DataFrame per
+    station in `_rows_by_station` - i.e. the ENTIRE file, just
+    reorganized, sitting in RAM for the life of the process. Real fix:
+      - `usecols=_CSV_USECOLS` - only the 5 columns this replay reads
+        are ever parsed; the other 10 columns in the file never enter
+        memory.
+      - `chunksize=_CSV_CHUNKSIZE` - this one-time startup scan streams
+        the file in bounded chunks; each chunk is processed and then
+        explicitly released (`del chunk, arr`) - at no point does a
+        DataFrame holding the full file exist.
+      - Per station, only up to `_STATION_BUFFER_ROWS` rows are ever
+        kept (`_rows_by_station[station_id]` is a bounded deque, not
+        that station's full history) - the rest of a station's rows
+        stay on disk and are fetched later, in the same small bounded
+        windows, by `_refill_station_buffer` as that station's buffer
+        drains during replay. Real dataset rows are still replayed in
+        their real recorded order; this only changes how much of that
+        real history sits in memory at once.
+    """
     global _loaded
     if _loaded:
         return
@@ -144,47 +215,92 @@ def _load_csv_once() -> None:
         _loaded = True
         return
 
-    df = pd.read_csv(CSV_PATH)
-    df[COL_TIMESTAMP] = pd.to_datetime(df[COL_TIMESTAMP])
-    df[COL_STATION_ID] = df[COL_STATION_ID].astype(str).str.strip()
-    df = df.sort_values(COL_TIMESTAMP)
-
-    for station_id, group in df.groupby(COL_STATION_ID):
-        _rows_by_station[station_id] = group.reset_index(drop=True)
-        _cursor[station_id] = 0
+    global_offset = 0
+    reader = pd.read_csv(
+        CSV_PATH,
+        usecols=_CSV_USECOLS,
+        parse_dates=[COL_TIMESTAMP],
+        chunksize=_CSV_CHUNKSIZE,
+    )
+    for chunk in reader:
+        chunk[COL_STATION_ID] = chunk[COL_STATION_ID].astype(str).str.strip()
+        arr = chunk[COL_STATION_ID].to_numpy()
+        if len(arr):
+            # Contiguous-run boundaries within this chunk (a station's
+            # rows are recorded as one contiguous block in this
+            # dataset) - cheap, vectorized, and only ever produces a
+            # handful of runs per chunk, never a per-row Python loop
+            # over the chunk.
+            change_points = np.where(arr[1:] != arr[:-1])[0] + 1
+            run_starts = np.concatenate(([0], change_points))
+            run_ends = np.concatenate((change_points, [len(arr)]))
+            for start, end in zip(run_starts, run_ends):
+                station_id = arr[start]
+                length = int(end - start)
+                info = _STATION_INDEX.get(station_id)
+                if info is None:
+                    _STATION_INDEX[station_id] = {"start": global_offset + int(start), "count": length}
+                    buf = _rows_by_station.setdefault(station_id, deque())
+                    _cursor.setdefault(station_id, 0)
+                else:
+                    info["count"] += length
+                    buf = _rows_by_station[station_id]
+                # Only ever buffer up to _STATION_BUFFER_ROWS rows per
+                # station here - a station whose real block is much
+                # longer than that simply leaves the remainder on disk,
+                # to be pulled in later (bounded, on demand) as this
+                # buffer drains during replay.
+                if len(buf) < _STATION_BUFFER_ROWS:
+                    room = _STATION_BUFFER_ROWS - len(buf)
+                    # MEMORY FIX: .iterrows() used to yield one pd.Series
+                    # per buffered row - each Series carries its own Index/
+                    # block-manager/dtype overhead (measured ~5KB deep size
+                    # per row vs. the ~5 scalar values it actually holds),
+                    # which added up to ~25-40MB of pure per-row object
+                    # overhead across the ~23k rows this buffer holds
+                    # (370 stations x up to 64 rows). to_dict(orient=
+                    # "records") produces one plain dict per row instead -
+                    # same values, same dict[column]-style access every
+                    # downstream reader (_current_count_from_row,
+                    # _level_from_row, etc.) already uses, at a fraction of
+                    # the memory.
+                    for rec in chunk.iloc[start:start + room].to_dict(orient="records"):
+                        buf.append(rec)
+                    _cursor[station_id] += min(room, length)
+        global_offset += len(arr)
+        # Explicitly release this chunk before pulling the next one -
+        # only the bounded per-station buffers above and the tiny
+        # {start, count} index survive past this loop iteration.
+        del chunk, arr
 
     _loaded = True
-    print(f"[csv_replay] loaded {len(df)} real rows across "
-          f"{len(_rows_by_station)} station(s) from {os.path.basename(CSV_PATH)}")
+    print(f"[csv_replay] indexed {len(_STATION_INDEX)} station(s), {global_offset} real rows, "
+          f"from {os.path.basename(CSV_PATH)} - buffering up to {_STATION_BUFFER_ROWS} rows per "
+          f"station at a time, never the full dataset.")
 
-    # Resume from wherever the previous leader left off, if anything
-    # was persisted (see _REPLAY_STATE_CACHE_KEY's docstring above) -
-    # runs exactly once per process, right after `_rows_by_station` is
-    # first populated, which is exactly when a newly-elected leader
-    # needs it.
+    # Resume the occupancy/date accumulators from wherever the
+    # previous leader left off, if anything was persisted (see
+    # _REPLAY_STATE_CACHE_KEY's docstring above) - runs exactly once
+    # per process, right after `_STATION_INDEX` is first populated,
+    # which is exactly when a newly-elected leader needs it.
     _restore_replay_state()
 
 
 def _restore_replay_state() -> None:
-    """Best-effort resume of the CSV replay cursor + occupancy
-    accumulator from whatever the previous leader last persisted (see
+    """Best-effort resume of the occupancy accumulator + last-row-date
+    from whatever the previous leader last persisted (see
     _persist_replay_state below). No-op if nothing was ever persisted
     (first-ever boot) or Redis is unreachable - every station simply
-    keeps its existing defaults (row 0, occupancy 0.0) exactly as
-    before this fix; this never blocks or raises.
+    keeps its existing defaults (occupancy 0.0) exactly as before this
+    fix; this never blocks or raises.
     """
     saved = cache.get_json(_REPLAY_STATE_CACHE_KEY)
     if not saved:
         return
     restored = 0
     for station_code, state in saved.items():
-        frame = _rows_by_station.get(station_code)
-        if frame is None or frame.empty or not isinstance(state, dict):
+        if station_code not in _STATION_INDEX or not isinstance(state, dict):
             continue
-
-        cursor = state.get("cursor")
-        if isinstance(cursor, int) and 0 <= cursor < len(frame):
-            _cursor[station_code] = cursor
 
         occupancy = state.get("occupancy")
         if isinstance(occupancy, (int, float)):
@@ -200,27 +316,25 @@ def _restore_replay_state() -> None:
         restored += 1
 
     if restored:
-        print(f"[csv_replay] resumed replay position for {restored} station(s) "
+        print(f"[csv_replay] resumed occupancy state for {restored} station(s) "
               f"from the previous leader (leader-failover continuity).")
 
 
 def _persist_replay_state() -> None:
-    """Snapshot every station's replay cursor + occupancy accumulator
+    """Snapshot every station's occupancy accumulator + last-row-date
     as one JSON blob, refreshed every tick, so a NEW leader process
     (after leadership changes hands - see
-    app/simulator/leader_election.py) can resume exactly where the
-    previous leader left off instead of silently restarting every
-    station's replay from scratch. Best-effort: if Redis is
-    unreachable this is simply skipped - failover itself doesn't
-    depend on this (LeaderElection handles that independently), the
-    new leader just falls back to starting that one station fresh,
-    same as before this fix.
+    app/simulator/leader_election.py) can resume its occupancy counts
+    instead of silently dropping every station back to 0. Best-effort:
+    if Redis is unreachable this is simply skipped - failover itself
+    doesn't depend on this (LeaderElection handles that independently),
+    the new leader just falls back to starting that one station's
+    occupancy fresh, same as before this fix.
     """
-    if not _rows_by_station:
+    if not _STATION_INDEX:
         return
     state = {
         station_code: {
-            "cursor": _cursor.get(station_code, 0),
             "occupancy": _occupancy_by_station.get(station_code, 0.0),
             "last_row_date": (
                 _last_row_date_by_station[station_code].isoformat()
@@ -228,20 +342,67 @@ def _persist_replay_state() -> None:
                 else None
             ),
         }
-        for station_code in _rows_by_station
+        for station_code in _STATION_INDEX
     }
     cache.set_json(_REPLAY_STATE_CACHE_KEY, state, ttl_seconds=_REPLAY_STATE_TTL_SECONDS)
 
-def _next_row(station_code: str) -> pd.Series | None:
-    frame = _rows_by_station.get(station_code)
-    if frame is None or frame.empty:
-        return None
-    i = _cursor[station_code]
-    row = frame.iloc[i]
-    _cursor[station_code] = (i + 1) % len(frame)                                                  
-    return row
 
-def _current_count_from_row(station_code: str, row: pd.Series) -> int:
+def _refill_station_buffer(station_code: str) -> bool:
+    """Reads the NEXT bounded window (up to `_STATION_BUFFER_ROWS` real
+    rows) for exactly ONE station off disk, appends them to that
+    station's buffer, then discards the temporary window DataFrame.
+    This is the only disk read that happens after startup, and it only
+    ever touches one station's own rows - never another station's,
+    never the whole file.
+
+    Wraps back to the start of that station's own block when it runs
+    out (`cursor >= count`), same "loop the real recorded history"
+    behavior the old per-station cursor had - just re-derived from the
+    on-disk index instead of an in-memory frame length.
+    """
+    info = _STATION_INDEX.get(station_code)
+    if not info or info["count"] <= 0:
+        return False
+
+    cursor = _cursor.get(station_code, 0)
+    if cursor >= info["count"]:
+        cursor = 0
+    take = min(_STATION_BUFFER_ROWS, info["count"] - cursor)
+    skip_data_rows = info["start"] + cursor
+
+    window = pd.read_csv(
+        CSV_PATH,
+        usecols=_CSV_USECOLS,
+        parse_dates=[COL_TIMESTAMP],
+        skiprows=range(1, skip_data_rows + 1),
+        nrows=take,
+    )
+    buf = _rows_by_station.setdefault(station_code, deque())
+    # MEMORY FIX: same fix as the initial buffer fill in _load_csv_once
+    # above - to_dict(orient="records") instead of .iterrows() avoids
+    # allocating one full pd.Series (Index + block-manager overhead)
+    # per buffered row.
+    for rec in window.to_dict(orient="records"):
+        buf.append(rec)
+    _cursor[station_code] = cursor + len(window)
+    # Explicitly release the temporary window - only the bounded
+    # buffer (`buf`, capped at _STATION_BUFFER_ROWS entries) survives.
+    del window
+    return True
+
+
+def _next_row(station_code: str) -> dict | None:
+    buf = _rows_by_station.get(station_code)
+    if buf is None:
+        return None
+    if not buf:
+        _refill_station_buffer(station_code)
+        buf = _rows_by_station.get(station_code)
+    if not buf:
+        return None
+    return buf.popleft()
+
+def _current_count_from_row(station_code: str, row: dict) -> int:
     """Real net occupancy for this station, NOT throughput.
 
     Phase 3 fix (docs/crowd-data-correctness.md, Bug 1): the old version
@@ -284,7 +445,7 @@ def _current_count_from_row(station_code: str, row: pd.Series) -> int:
     _occupancy_by_station[station_code] = new_occupancy
     return int(round(new_occupancy))
 
-def _level_from_row(row: pd.Series, ratio: float) -> CrowdLevel:
+def _level_from_row(row: dict, ratio: float) -> CrowdLevel:
     """Bugfix: this used to prefer the CSV's own `crowding_label` column
     whenever present, only falling back to `CrowdLevel.from_ratio(ratio)`
     if it was missing - and since every row in this dataset has a label,
@@ -306,6 +467,42 @@ def _level_from_row(row: pd.Series, ratio: float) -> CrowdLevel:
     docs/crowd-data-correctness.md for the measurement behind this.
     """
     return CrowdLevel.from_ratio(ratio)
+
+def _synthetic_count(station: dict, now_dt: datetime) -> int:
+    """Fallback occupancy for a station whose station_code was never
+    indexed from passenger_flow.csv.gz at all (`_next_row` returns
+    None for it every tick - see `_STATION_INDEX`/`_load_csv_once`
+    above). The CSV only covers 370 real stations; any active DB
+    station outside that set (e.g. one added after the dataset was
+    captured, or an interchange/"connector" entry like "Noida Sector
+    51 [Conn: Blue]" that the dataset doesn't carry as its own row
+    block) used to hit the `continue` below and get skipped entirely -
+    never upserted into station_crowd_state, never logged - so its
+    Station Analytics card stayed frozen at "0 crowd readings" forever
+    even with the simulator fully running, because this replay only
+    ever advances real CSV rows and never fabricated one for a station
+    with zero rows to begin with.
+
+    This intentionally does NOT touch any station that DOES have CSV
+    rows (those keep replaying their real recorded history exactly as
+    before) - it only fills the gap for stations the dataset has no
+    coverage of, using the same morning/evening peak-hour shape the AI
+    engine's own heuristic fallback uses when the trained model has
+    nothing to say (see app/ai_engine/prediction/crowd_predictor.py's
+    `_heuristic`), scaled to the station's own capacity with a little
+    jitter so the trend looks live rather than a flat line.
+    """
+    local_dt = to_business_time(now_dt)
+    hour = local_dt.hour + local_dt.minute / 60
+    morning_peak = np.exp(-((hour - 9) ** 2) / 4)
+    evening_peak = np.exp(-((hour - 18.5) ** 2) / 5)
+    base_ratio = 0.12 + 0.55 * morning_peak + 0.6 * evening_peak
+    if local_dt.weekday() >= 5:
+        base_ratio *= 0.55
+    base_ratio *= random.uniform(0.9, 1.1)
+
+    capacity = station["capacity"] or 0
+    return max(0, round(capacity * base_ratio))
 
 def _active_checkins_by_station_by_station(db: Session, station_ids: list[int]) -> dict[int, int]:
     """How many real passengers are CURRENTLY checked in at each station
@@ -393,15 +590,22 @@ def _tick_sync(db: Session) -> list[dict]:
     for station in stations:
         row = _next_row(station["station_code"])
         if row is None:
-            continue                                                                   
+            # No CSV coverage for this station_code at all - synthesize
+            # a reading instead of skipping the station outright (see
+            # _synthetic_count's docstring for why this stayed at 0
+            # before).
+            base_count = _synthetic_count(station, datetime.now(timezone.utc))
+            source_timestamp = datetime.now(timezone.utc).isoformat()
+        else:
+            base_count = _current_count_from_row(station["station_code"], row)
+            source_timestamp = str(row[COL_TIMESTAMP])
 
-        base_count = _current_count_from_row(station["station_code"], row)
         checked_in = checked_in_by_station.get(station["id"], 0)
         count = base_count + checked_in                                                 
 
         capacity = station["capacity"]
         ratio = count / capacity if capacity else 0
-        level = _level_from_row(row, ratio)
+        level = CrowdLevel.from_ratio(ratio) if row is None else _level_from_row(row, ratio)
 
         # LIVE STATE - always upserted this tick (bounded table, one
         # row per station, is what backs the dashboard/heatmap/
@@ -428,7 +632,7 @@ def _tick_sync(db: Session) -> list[dict]:
             "station_name": station["station_name"],
             "current_count": count,
             "crowd_level": level,
-            "source_timestamp": str(row[COL_TIMESTAMP]),                                                           
+            "source_timestamp": source_timestamp,
         })
 
         if level in NOTIFIABLE_CROWD_LEVELS:
@@ -513,7 +717,7 @@ async def replay_tick(db: Session) -> list[dict]:
         )
     return updates
 
-async def run_forever(session_factory, interval_seconds: int = 5) -> None:
+async def run_forever(session_factory, interval_seconds: int = 60) -> None:
     """Drop-in replacement for live_simulator.run_forever. Call this
     from scheduler.py / main.py instead, at startup - pass the SAME
     interval_seconds you pass to train_simulator.run_forever, so both

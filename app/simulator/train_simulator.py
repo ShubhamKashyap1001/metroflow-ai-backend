@@ -173,7 +173,7 @@ async def track_tick(db: Session, interval_seconds: int) -> list[dict]:
         )
     return updates
 
-async def run_forever(session_factory, interval_seconds: int = 5) -> None:
+async def run_forever(session_factory, interval_seconds: int = 60) -> None:
     while True:
         db = session_factory()
         try:

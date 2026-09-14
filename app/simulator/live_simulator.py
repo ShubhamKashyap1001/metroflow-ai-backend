@@ -1,4 +1,3 @@
-
 import asyncio
 import random
 import time
@@ -139,6 +138,27 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
         for station in stations:
             prediction = predict_crowd(station["id"], datetime.now(timezone.utc), light=True)
             weights.append(max(1.0, prediction["predicted_count"]))
+
+        # Starvation guard: with a real metro network this list can run
+        # into the hundreds of stations, and the AI model's predicted
+        # count for any station it wasn't trained on (e.g. a station
+        # added to the DB after the last `train_crowd_model.py` run, or
+        # an interchange/"connector" stop the model saw very little of)
+        # falls back to the 1.0 floor above. A weight of 1.0 next to
+        # peers weighted in the hundreds is effectively zero under
+        # random.choices() - across thousands of ticks that station's
+        # selection probability stays low enough that it can go a full
+        # 24h (or longer) without a single check-in, which is exactly
+        # what left "Noida Sector 51 [Conn: Blue]" stuck at 0 inflow/
+        # outflow while every normally-weighted station kept filling
+        # in fine. Re-floor every weight to a fixed fraction of the
+        # tick's mean weight so no active station's odds of being
+        # picked ever collapse to near-zero just because the model has
+        # little/no signal for it yet.
+        if weights:
+            mean_weight = sum(weights) / len(weights)
+            min_weight = max(1.0, mean_weight * 0.15)
+            weights = [max(w, min_weight) for w in weights]
 
         num_checkins = min(
             settings.SIMULATOR_MAX_CHECKINS_PER_TICK,

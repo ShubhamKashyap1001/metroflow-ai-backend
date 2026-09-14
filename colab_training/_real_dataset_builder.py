@@ -21,7 +21,7 @@ from datetime import datetime
 
 import pandas as pd
 
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "datasets")
+DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 TRAINS_CSV = os.path.join(DATASET_DIR, "trains.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")

@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: metroflow-ai-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # your Postgres connection string
+      - key: REDIS_URL
+        sync: false          # optional - app degrades gracefully if unset
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GOOGLE_GENAI_API_KEY
+        sync: false
+     
+      - key: CORS_ORIGINS
+        sync: false
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: AI_MODEL_LIGHT_MODE
+        value: "true"

@@ -37,11 +37,25 @@ from sklearn.model_selection import train_test_split
 from app.utils.timezone import business_today
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets")
+DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
 TRAIN_OPERATIONS_CSV = os.path.join(DATASET_DIR, "train_operations.csv.gz")
 TRAINS_CSV = os.path.join(DATASET_DIR, "trains.csv.gz")
+
+# MEMORY FIX: both passenger_flow.csv.gz and train_operations.csv.gz
+# are large production datasets. A plain pd.read_csv() on either
+# pulled every column (most of them unused here) and every row into
+# RAM in one shot. This module only needs the columns below, so both
+# are read with usecols=..., and both are streamed in bounded
+# CSV_CHUNK_SIZE-row chunks rather than parsed whole - see
+# _crowd_table() and _delay_table() for what each chunk is reduced to
+# before the next one is read.
+PASSENGER_FLOW_USECOLS = ["station_id", "hour", "day_of_week", "is_weekend", "entries", "exits"]
+TRAIN_OPERATIONS_USECOLS = [
+    "station_id", "train_id", "scheduled_arrival", "delay_arrival_min", "weather",
+]
+CSV_CHUNK_SIZE = 100_000
 
 # Kept in sync with delay_predictor.py / colab_training/train_delay_model.py:
 # the shipped delay_model.pkl is the 8-feature real-data generation (adds
@@ -54,7 +68,17 @@ FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
             "passenger_count", "capacity_passengers", "train_age_days", "weather_code"]
 TARGET = "delay_minutes"
 
-DISPLAY_NAMES = {"random_forest": "Random Forest", "xgboost": "XGBoost"}
+DISPLAY_NAMES = {
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+    # Current production artifacts (Sept 2026 retrain) suffix the
+    # winning candidate name with "_tuned" (see colab_training/
+    # train_metroflow_models_colab.ipynb) - map those too so the
+    # dashboard still shows a friendly label instead of the raw
+    # internal model_name string.
+    "random_forest_tuned": "Random Forest",
+    "xgboost_tuned": "XGBoost",
+}
 
 WEATHER_CODE = {"Sunny": 0, "Overcast": 1, "Rainy": 2, "Stormy": 3}
 
@@ -107,60 +131,101 @@ def _train_info_map() -> pd.DataFrame:
 def _crowd_table(station_id_map: dict) -> pd.DataFrame:
     """Same real passenger_count table crowd_metrics.py builds - the
     delay model was trained with passenger_count as a feature, so the
-    training table needs it too."""
-    df = pd.read_csv(PASSENGER_FLOW_CSV)
-    df["station_id"] = df["station_id"].astype(str).str.strip().map(station_id_map)
-    df = df.dropna(subset=["station_id"])
-    df["station_id"] = df["station_id"].astype(int)
+    training table needs it too.
 
-    df["entries"] = df["entries"].clip(lower=0)
-    df["exits"] = df["exits"].clip(lower=0)
-    df["passenger_count"] = df["entries"] + df["exits"]
-    df["is_peak_hour"] = ((df["hour"].between(8, 11)) | (df["hour"].between(17, 20))).astype(int)
+    MEMORY FIX: streams passenger_flow.csv.gz in bounded
+    CSV_CHUNK_SIZE-row chunks (only PASSENGER_FLOW_USECOLS columns)
+    and reduces each chunk to a partial sum/count per (station_id,
+    hour, day_of_week, is_weekend, is_peak_hour) group immediately,
+    instead of materializing the whole file as one DataFrame. The
+    partial sums are combined and divided once at the end (mean =
+    sum/count, rounded to int) in the same sorted group-key order a
+    single-shot groupby(...).mean() would produce, so the result is
+    unchanged - only one CSV_CHUNK_SIZE-row chunk plus these small
+    running per-group totals are ever resident in memory at once."""
+    partial_group_sums: list[pd.DataFrame] = []
+    group_keys = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 
-    grouped = (
-        df.groupby(["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"])
-        ["passenger_count"].mean().round().astype(int).reset_index()
-    )
-    return grouped
+    for chunk in pd.read_csv(PASSENGER_FLOW_CSV, usecols=PASSENGER_FLOW_USECOLS, chunksize=CSV_CHUNK_SIZE):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip().map(station_id_map)
+        chunk = chunk.dropna(subset=["station_id"])
+        chunk["station_id"] = chunk["station_id"].astype(int)
+
+        chunk["entries"] = chunk["entries"].clip(lower=0)
+        chunk["exits"] = chunk["exits"].clip(lower=0)
+        chunk["passenger_count"] = chunk["entries"] + chunk["exits"]
+        chunk["is_peak_hour"] = ((chunk["hour"].between(8, 11)) | (chunk["hour"].between(17, 20))).astype(int)
+
+        chunk_grouped = chunk.groupby(group_keys)["passenger_count"].agg(["sum", "count"]).reset_index()
+        partial_group_sums.append(chunk_grouped)
+
+    if not partial_group_sums:
+        return pd.DataFrame(columns=group_keys + ["passenger_count"])
+
+    combined = pd.concat(partial_group_sums, ignore_index=True)
+    combined = combined.groupby(group_keys)[["sum", "count"]].sum().reset_index()
+    combined["passenger_count"] = (combined["sum"] / combined["count"]).round().astype(int)
+    return combined[group_keys + ["passenger_count"]].sort_values(group_keys).reset_index(drop=True)
 
 def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame:
     """Row-level (not grouped by station/hour/day only) - capacity_passengers
     and train_age_days are real per-train continuous values, so grouping
     them away before merging (like the old 6-feature version of this
     function did) would lose exactly the signal those 2 features exist to
-    capture. Mirrors colab_training/_real_dataset_builder.py::build_delay_dataset."""
-    df = pd.read_csv(TRAIN_OPERATIONS_CSV)
-    df["station_id"] = df["station_id"].astype(str).str.strip().map(station_id_map)
-    df = df.dropna(subset=["station_id"])
-    df["station_id"] = df["station_id"].astype(int)
+    capture. Mirrors colab_training/_real_dataset_builder.py::build_delay_dataset.
 
-    df["train_id"] = df["train_id"].astype(str).str.strip()
+    MEMORY FIX: every row of train_operations.csv.gz is genuinely
+    needed here (this table stays row-level, it's never aggregated
+    away), but only TRAIN_OPERATIONS_USECOLS columns are - so the file
+    is read with usecols=... and streamed in bounded
+    CSV_CHUNK_SIZE-row chunks, with each chunk immediately reduced to
+    its final derived/merged columns before the next chunk is parsed,
+    instead of holding the full wide (17-column) file in memory while
+    deriving columns on it."""
+    kept_chunks: list[pd.DataFrame] = []
+    total_before = 0
 
-    df["scheduled_arrival"] = pd.to_datetime(df["scheduled_arrival"])
-    df["hour"] = df["scheduled_arrival"].dt.hour
-    df["day_of_week"] = df["scheduled_arrival"].dt.weekday
-    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
-    df["is_peak_hour"] = ((df["hour"].between(8, 11)) | (df["hour"].between(17, 20))).astype(int)
-    df["delay_minutes"] = df["delay_arrival_min"].fillna(0).clip(lower=0)
-    # Bug fix: the shipped delay_model.pkl was trained with a 9th
-    # feature, weather_code (see colab_training/_real_dataset_builder.py
-    # ::build_delay_dataset and delay_predictor.py), but this table
-    # never built that column - X_test[model_features] below raised a
-    # KeyError on every request, which the try/except in
-    # compute_delay_metrics() swallowed into a permanent "no trained
-    # model" empty state for the whole delay dashboard card.
-    df["weather_code"] = df["weather"].map(WEATHER_CODE).fillna(0).astype(int)
+    for chunk in pd.read_csv(TRAIN_OPERATIONS_CSV, usecols=TRAIN_OPERATIONS_USECOLS, chunksize=CSV_CHUNK_SIZE):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip().map(station_id_map)
+        chunk = chunk.dropna(subset=["station_id"])
+        chunk["station_id"] = chunk["station_id"].astype(int)
 
-    df = df.merge(train_info, on="train_id", how="left")
-    before = len(df)
-    df = df.dropna(subset=["capacity_passengers", "train_age_days"])
-    dropped = before - len(df)
+        chunk["train_id"] = chunk["train_id"].astype(str).str.strip()
+
+        chunk["scheduled_arrival"] = pd.to_datetime(chunk["scheduled_arrival"])
+        chunk["hour"] = chunk["scheduled_arrival"].dt.hour
+        chunk["day_of_week"] = chunk["scheduled_arrival"].dt.weekday
+        chunk["is_weekend"] = (chunk["day_of_week"] >= 5).astype(int)
+        chunk["is_peak_hour"] = ((chunk["hour"].between(8, 11)) | (chunk["hour"].between(17, 20))).astype(int)
+        chunk["delay_minutes"] = chunk["delay_arrival_min"].fillna(0).clip(lower=0)
+        # Bug fix: the shipped delay_model.pkl was trained with a 9th
+        # feature, weather_code (see colab_training/_real_dataset_builder.py
+        # ::build_delay_dataset and delay_predictor.py), but this table
+        # never built that column - X_test[model_features] below raised a
+        # KeyError on every request, which the try/except in
+        # compute_delay_metrics() swallowed into a permanent "no trained
+        # model" empty state for the whole delay dashboard card.
+        chunk["weather_code"] = chunk["weather"].map(WEATHER_CODE).fillna(0).astype(int)
+
+        chunk = chunk.merge(train_info, on="train_id", how="left")
+        total_before += len(chunk)
+        chunk = chunk.dropna(subset=["capacity_passengers", "train_age_days"])
+        kept_chunks.append(chunk[["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
+                                   "delay_minutes", "capacity_passengers", "train_age_days", "weather_code"]])
+
+    if kept_chunks:
+        df = pd.concat(kept_chunks, ignore_index=True)
+    else:
+        df = pd.DataFrame(columns=["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
+                                    "delay_minutes", "capacity_passengers", "train_age_days", "weather_code"])
+
+    dropped = total_before - len(df)
     if dropped:
         print(f"[{__name__}] delay metrics: dropped {dropped} row(s) with unknown train_id")
 
-    return df[["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
-               "delay_minutes", "capacity_passengers", "train_age_days", "weather_code"]]
+    return df
 
 def _load_model():
     if not os.path.exists(MODEL_PATH):
@@ -274,8 +339,26 @@ def compute_delay_metrics() -> dict:
             evaluated["model_name"] = DISPLAY_NAMES.get(name, name)
             models_out[name] = evaluated
 
-        best = models_out.get(trained_name) or next(iter(models_out.values()))
-        display_name = DISPLAY_NAMES.get(trained_name, trained_name)
+        # Bug fix: `trained_name` is whatever colab_training picked as the
+        # winner using ITS OWN dataset build/test split at training time.
+        # models_out above is a fresh, independent re-evaluation (this
+        # module's own dataset build + train_test_split(random_state=42)) -
+        # normally identical, but the two can disagree (different data
+        # snapshot since training, a chunked-vs-single-shot aggregation
+        # rounding difference, etc). Trusting the stale `trained_name` in
+        # that case shows an "Active" badge on a candidate whose own MAE/R2
+        # displayed right next to it is visibly worse than the other card -
+        # exactly the mismatch this fixes. Pick the winner from the live
+        # numbers actually being displayed instead, so the badge always
+        # matches what's on screen; still fall back to `trained_name` (then
+        # the first candidate) if MAE is missing for every candidate.
+        scored = [(name, m) for name, m in models_out.items() if m.get("mae") is not None]
+        if scored:
+            winner_name, best = min(scored, key=lambda item: item[1]["mae"])
+        else:
+            winner_name = trained_name
+            best = models_out.get(trained_name) or next(iter(models_out.values()))
+        display_name = DISPLAY_NAMES.get(winner_name, winner_name)
 
         return {
             "available": True,

@@ -19,6 +19,25 @@ MAX_LOG_ENTRIES = 500
 _buffer: deque[dict] = deque(maxlen=MAX_LOG_ENTRIES)
 _lock = Lock()
 
+# Render-Free logging fix: raising the ROOT logger to INFO below (so
+# this app's own INFO logs are visible/captured) has a side effect on
+# any third-party library logger that has no level of its own set -
+# it inherits root's effective level instead of the interpreter's
+# normal WARNING default. httpx (used internally by the google-genai
+# client for every chatbot request - see app/services/chatbot_service.py)
+# logs one "HTTP Request: ..." line at INFO per outbound call once
+# that happens, which would otherwise have been silent. This is exactly
+# the kind of incidental per-request log volume this fix targets, so
+# known-chatty third-party loggers are pinned back to WARNING
+# explicitly here - this changes nothing about this app's OWN loggers
+# (nothing under `app.*` is touched) or their levels.
+_NOISY_THIRD_PARTY_LOGGERS = ("httpx", "httpcore")
+
+
+def _quiet_third_party_loggers() -> None:
+    for name in _NOISY_THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 class BufferLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
@@ -56,6 +75,7 @@ def install() -> None:
         root.addHandler(_handler)
     if root.level == logging.NOTSET or root.level > logging.INFO:
         root.setLevel(logging.INFO)
+    _quiet_third_party_loggers()
 
 
 def get_recent_logs(limit: int = 100, level: str | None = None) -> list[dict]:

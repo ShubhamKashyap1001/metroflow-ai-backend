@@ -44,6 +44,16 @@ class Settings(BaseSettings):
 
     CORS_ORIGINS: str = "http://localhost:3000"
 
+    # Request/upload size protection (Render Free 512MB): FastAPI/
+    # Starlette impose no body-size limit by default, so a single
+    # oversized request could otherwise buffer an unbounded amount of
+    # memory before validation ever runs. 1 MiB comfortably covers
+    # every legitimate request body this API accepts today (the
+    # largest, the chatbot's 40-message x 4000-char history, tops out
+    # around 160KB) while still bounding worst case. See
+    # app/core/request_limits.py.
+    MAX_REQUEST_BODY_BYTES: int = 1_048_576
+
     AI_MODELS_DIR: str = "app/ai_engine/saved_models"
     AI_DATASETS_DIR: str = "app/ai_engine/datasets"
 
@@ -65,17 +75,24 @@ class Settings(BaseSettings):
     # TWO fully-trained models (random_forest and xgboost) so the
     # dashboard can show both predictions side by side. When True,
     # each bundle is pruned down to just its winning (lowest-MAE)
-    # model right after loading, dropping the other from `models`.
+    # model right after loading (see
+    # app.ai_engine.model_bundle.prune_to_winner), dropping the other
+    # from `models` before it's ever stored in the process-wide
+    # registry.
     #
-    # Measured cost of keeping both candidates loaded (single worker,
-    # all 3 bundles): only ~17.6MB total, of which pruning to one
-    # candidate each saves ~3.7MB - xgboost's own library import
-    # (~150MB) is paid regardless, since frequency_model.pkl's winner
-    # is xgboost either way. That's not worth losing the side-by-side
-    # comparison feature over, so this defaults to False. Only flip it
-    # to True if you're chasing every last MB on an instance that's
-    # still right at the OOM line even after WEB_CONCURRENCY=1.
-    AI_MODEL_LIGHT_MODE: bool = False
+    # Defaults to True in production: on a Render Free (512MB)
+    # instance every MB of headroom matters, and this is a free one -
+    # the pruned-away candidate is never used by the 3 production
+    # predictors (crowd/delay/frequency) either way, since they only
+    # ever read the winning model out of the bundle. The dashboard's
+    # side-by-side model-comparison view is unaffected: it's powered by
+    # app/ai_engine/prediction/*_metrics.py, which load and evaluate
+    # both candidates independently of this registry/flag (see those
+    # modules' own docstrings). Set to False via env var if you're on
+    # an instance with more headroom and, for some other reason, want
+    # the production predictor bundles themselves to also keep both
+    # candidates in memory.
+    AI_MODEL_LIGHT_MODE: bool = True
 
     # BUGFIX (naive datetime / timezone handling): every train_schedule
     # arrival/departure time, "peak hour" window, and day-of-week
@@ -95,7 +112,7 @@ class Settings(BaseSettings):
                                                                        
     CACHE_TTL_SECONDS: int = 5
 
-    ENABLE_SIMULATOR: bool = False
+    ENABLE_SIMULATOR: bool = True
     # Each tick advances every station one row forward through its own
     # CSV history (app/simulator/csv_replay_simulator.py) - the dataset
     # has 18 hourly rows/station/day (5 AM-10 PM), so at the old 10s
@@ -106,7 +123,7 @@ class Settings(BaseSettings):
     # fast to watch. 60s stretches that same cycle to 18 minutes,
 
     # SIMULATOR_INTERVAL_SECONDS: int = 20
-    SIMULATOR_INTERVAL_SECONDS: int = 10
+    SIMULATOR_INTERVAL_SECONDS: int = 60
     SIMULATOR_PASSENGER_POOL_SIZE: int = 40
     SIMULATOR_MAX_CHECKINS_PER_TICK: int = 6
 
@@ -151,8 +168,8 @@ class Settings(BaseSettings):
     # (and one transaction) in a single pass.
     CROWD_ROLLUP_BATCH_SIZE: int = 1000
 
-    ENABLE_TRAIN_TRACKING: bool = False
-    TRAIN_TRACK_INTERVAL_SECONDS: int = 10
+    ENABLE_TRAIN_TRACKING: bool = True
+    TRAIN_TRACK_INTERVAL_SECONDS: int = 60
 
     # --- AI Chatbot (floating assistant widget) ---------------------
     # Server-side only - never exposed to the frontend. If unset, the
@@ -226,6 +243,33 @@ class Settings(BaseSettings):
     # single transient per-recipient send failure within one already-
     # running job.
     NOTIFICATION_DISPATCH_MAX_JOB_ATTEMPTS: int = 5
+
+    # --- WebSocket resource caps (Render Free 512MB) ------------------
+    # Each open /ws/monitor connection (see app/websocket/manager.py)
+    # holds server-side memory for as long as it stays open, and every
+    # broadcast fans out to every entry in active_connections at once.
+    # Previously active_connections had no ceiling at all, so a
+    # runaway/buggy client, a scripted reconnect loop, or simply enough
+    # real dashboard tabs could grow it - and therefore per-broadcast
+    # fan-out - without bound. This caps how many WebSocket connections
+    # a single worker process will hold open at once; beyond it, new
+    # connections are rejected cleanly (WS close code 1013, "try again
+    # later") before the handshake is even accepted, so a rejected
+    # client never occupies a connection slot and every already-
+    # connected client is unaffected. 200 is generously above normal
+    # per-worker dashboard usage (WEB_CONCURRENCY defaults to 1) while
+    # still bounding worst-case memory on a free instance; raise it via
+    # env var once you're on a bigger one.
+    WS_MAX_CONNECTIONS: int = 200
+
+    # A single authenticated user_id (several open tabs/devices, or a
+    # stuck client stuck in a reconnect loop) can hold at most this
+    # many simultaneous connections before further ones from that same
+    # user are rejected the same way, so one user's client can't eat an
+    # outsized share of WS_MAX_CONNECTIONS on its own. Anonymous
+    # (no-token) connections aren't tracked per-user and are unaffected
+    # by this limit. Comfortably above realistic multi-tab usage.
+    WS_MAX_CONNECTIONS_PER_USER: int = 20
 
     model_config = SettingsConfigDict(
         env_file=".env",

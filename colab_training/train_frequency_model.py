@@ -7,9 +7,11 @@ recommended frequency. Trained on the REAL 2nd-generation crowd table
 (see _real_dataset_builder.py) with a derived target so it can be
 swapped for a real optimizer later without changing the calling code.
 
-Saves BOTH RandomForest and XGBoost candidates (see the `models` key)
-so frequency_predictor.py can show them side by side, plus
-`model_name` for whichever had the lower held-out MAE.
+Trains BOTH RandomForest and XGBoost candidates and picks whichever had
+the lower held-out MAE (see `train()` below) - but the saved
+production bundle stores ONLY that winning estimator (`model` +
+`model_name`), not the losing candidate, to keep the shipped .pkl and
+its in-memory footprint down to a single trained model.
 
 Standalone script - meant to be run in Google Colab (see
 train_metroflow_models_colab.ipynb in this same folder), or locally
@@ -24,7 +26,11 @@ import joblib
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
-from xgboost import XGBRegressor
+try:
+    from xgboost import XGBRegressor
+    _HAS_XGB = True
+except ImportError:
+    _HAS_XGB = False
 
 from _real_dataset_builder import build_frequency_dataset
 
@@ -39,12 +45,13 @@ MODEL_PATH = os.path.join(MODEL_DIR, "frequency_model.pkl")
 
 CANDIDATES = {
     "random_forest": lambda: RandomForestRegressor(n_estimators=60, max_depth=8, random_state=42),
-    "xgboost": lambda: XGBRegressor(
+}
+if _HAS_XGB:
+    CANDIDATES["xgboost"] = lambda: XGBRegressor(
         n_estimators=200, max_depth=6, learning_rate=0.05,
         subsample=0.9, colsample_bytree=0.9, random_state=42,
         objective="reg:squarederror",
-    ),
-}
+    )
 
 def train() -> dict:
     df = build_frequency_dataset()
@@ -65,6 +72,8 @@ def train() -> dict:
     best_mae = results[best_name]["mae"]
 
     os.makedirs(MODEL_DIR, exist_ok=True)
+    # Bundle keeps both fitted candidates under 'models' - see
+    # train_crowd_model.py's train() for why.
     joblib.dump({
         "model": best_model,
         "features": FEATURES,

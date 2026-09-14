@@ -410,6 +410,67 @@ def test_recovered_job_does_not_resend_to_already_notified_recipients(full_schem
     assert len(recipients_logged) == len(set(recipients_logged)), "no duplicate NotificationLog rows for this job"
 
 
+def test_dispatch_recipient_lookup_selects_only_email_and_phone_columns(full_schema_session_factory):
+    """RAM FIX (Render Free 512MB): alert_service._dispatch resolves its
+    email/SMS recipient set by querying UserProfile - a table that grows
+    with the real (non-simulated) user base and is queried fresh on
+    every single alert create/resolve, not just once. It only ever
+    reads `.email`/`.phone` off each row, so the query must select just
+    those two columns instead of hydrating a full UserProfile ORM
+    instance (id, full_name, username, avatar_url, role, timestamps,
+    etc.) per active user - the same "fetch only required columns"
+    fix already applied to train_tracking.py's route-cache query.
+
+    Verified functionally (not just by inspecting the query object):
+    patch Session.query itself and assert every call site that reads
+    from UserProfile requests only (UserProfile.email, UserProfile.phone),
+    never the bare UserProfile entity - while still confirming the
+    recipient resolution behaves identically (right emails reached)."""
+    TestSessionLocal, alert_id = full_schema_session_factory
+
+    from sqlalchemy.orm import Session as _Session
+
+    queried_entities = []
+    original_query = _Session.query
+
+    def _tracking_query(self, *entities, **kwargs):
+        queried_entities.append(entities)
+        return original_query(self, *entities, **kwargs)
+
+    with patch.object(_Session, "query", _tracking_query):
+        with patch.object(alert_service, "send_alert_emails") as mock_send_emails:
+            mock_send_emails.return_value = {
+                "alice@example.com": "sent",
+                "bob@example.com": "sent",
+            }
+            alert_service.dispatch_alert_notifications(alert_id, None, True, False)
+
+    # The two real recipients were still resolved correctly...
+    mock_send_emails.assert_called_once()
+    sent_recipients = set(
+        mock_send_emails.call_args.kwargs.get("recipients")
+        or mock_send_emails.call_args[0][0]
+    )
+    assert sent_recipients == {"alice@example.com", "bob@example.com"}
+
+    # ...but no call site ever asked for the whole UserProfile entity -
+    # only the (email, phone) column pair.
+    user_profile_calls = [
+        entities for entities in queried_entities
+        if entities and entities[0] is UserProfile
+    ]
+    assert not user_profile_calls, (
+        "a full UserProfile row was queried instead of selecting only "
+        "the email/phone columns actually used"
+    )
+    column_only_calls = [
+        entities for entities in queried_entities
+        if entities and entities[0] is UserProfile.email
+    ]
+    assert column_only_calls, "expected at least one (UserProfile.email, UserProfile.phone) query"
+    assert column_only_calls[0] == (UserProfile.email, UserProfile.phone)
+
+
 def test_run_job_is_a_no_op_if_already_done(sqlite_session_factory):
     """If recovery resubmits a job right as its original in-flight run
     finishes (a narrow race, not the common case), the resubmitted run

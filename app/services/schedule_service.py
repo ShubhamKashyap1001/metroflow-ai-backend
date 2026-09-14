@@ -624,3 +624,31 @@ def delayed_schedules(
         return query.order_by(TrainSchedule.delay_minutes.desc()).offset(offset).limit(limit).all()
 
     return _cached_schedule_list(cache_key, _compute)
+
+def delayed_schedules_count(
+    db: Session,
+    station_id: int | None = None,
+    state: str | None = None,
+) -> int:
+    """Lightweight COUNT counterpart to delayed_schedules() above - same
+    filter semantics (delay_minutes > 0 OR status == DELAYED, optional
+    station/state scope), but returns just the total matching row count
+    instead of fetching/paginating actual rows. Used by the dashboard's
+    Recent Alerts widget, which only needs the number, not the capped
+    (DEFAULT_SCHEDULE_LIST_LIMIT-bounded) list itself. Cached the same
+    way and for the same reason as the list version above."""
+    cache_key = f"schedule:delayed:count:{station_id}:{state}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    query = db.query(TrainSchedule).filter(
+        (TrainSchedule.delay_minutes > 0) | (TrainSchedule.status == ScheduleStatus.DELAYED)
+    )
+    if station_id:
+        query = query.filter(TrainSchedule.station_id == station_id)
+    query = _scope_to_state(query, state)
+    count = query.count()
+
+    cache.set_json(cache_key, count, ttl_seconds=settings.SCHEDULE_CACHE_TTL_SECONDS)
+    return count

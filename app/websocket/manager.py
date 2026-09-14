@@ -81,6 +81,7 @@ summarised here since they shaped this file's structure:
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -94,6 +95,33 @@ from app.websocket import events
 logger = logging.getLogger(__name__)
 
 SEND_TIMEOUT_SECONDS = 5
+
+# Maximum number of simultaneous WebSocket connections this process
+# will hold open at once (see connect()/_reject() below), and a
+# per-authenticated-user sub-limit on top of it. Read from
+# app.core.config.settings when that module is importable (the normal
+# running app, where these are also configurable via the
+# WS_MAX_CONNECTIONS/WS_MAX_CONNECTIONS_PER_USER env vars through
+# pydantic-settings); falls back to reading those same env vars
+# directly otherwise, so this module keeps working unmodified inside
+# the offline scripts/verify_ws_*.py harnesses, which inject a minimal
+# fake `fastapi` and never construct a real app.core.config.Settings
+# (which requires DATABASE_URL/SUPABASE_URL/SUPABASE_KEY to be set).
+try:
+    from app.core.config import settings as _settings
+
+    MAX_CONNECTIONS = int(getattr(_settings, "WS_MAX_CONNECTIONS", 200))
+    MAX_CONNECTIONS_PER_USER = int(getattr(_settings, "WS_MAX_CONNECTIONS_PER_USER", 20))
+except Exception:
+    MAX_CONNECTIONS = int(os.environ.get("WS_MAX_CONNECTIONS", "200"))
+    MAX_CONNECTIONS_PER_USER = int(os.environ.get("WS_MAX_CONNECTIONS_PER_USER", "20"))
+
+# WS close code sent to a connection rejected for being over capacity,
+# before its handshake is ever accepted (see _reject()). 1013 is the
+# standard "Try Again Later" code (RFC 6455 / IANA registry) for a
+# server that's temporarily overloaded - exactly this situation, and
+# distinct from an auth/policy rejection (which would be 1008).
+WS_CLOSE_TRY_AGAIN_LATER = 1013
 
 # Channel used to fan any event out to every API worker process, not
 # just whichever one generated it (simulator ticks) or happened to
@@ -515,7 +543,28 @@ class ConnectionManager:
         websocket: WebSocket,
         user_id: str | None = None,
         subprotocol: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Returns True if the connection was accepted and registered,
+        False if it was rejected for being at capacity (see
+        MAX_CONNECTIONS/MAX_CONNECTIONS_PER_USER above). A rejected
+        socket is closed (see _reject()) *before* websocket.accept()
+        is ever called, so it's never added to active_connections/
+        _connection_users - it doesn't occupy a connection slot or any
+        other per-connection memory, and every already-connected
+        client is completely unaffected. Callers (see /ws/monitor in
+        app/main.py) must check the return value and stop - the socket
+        has already been closed, there's nothing left to accept()."""
+        if len(self.active_connections) >= MAX_CONNECTIONS:
+            await self._reject(websocket, "server at capacity")
+            return False
+        if user_id is not None:
+            per_user = sum(
+                1 for uid in self._connection_users.values() if uid == user_id
+            )
+            if per_user >= MAX_CONNECTIONS_PER_USER:
+                await self._reject(websocket, "too many connections for this user")
+                return False
+
         # `subprotocol` is the single value (out of whatever the client
         # offered via Sec-WebSocket-Protocol) we're accepting the
         # handshake with - required by the WS spec whenever the client
@@ -534,6 +583,29 @@ class ConnectionManager:
         # otherwise only arrive on the next simulator tick, up to
         # SIMULATOR_INTERVAL_SECONDS later).
         await self._send_latest_state(websocket)
+        return True
+
+    async def _reject(self, websocket: WebSocket, reason: str) -> None:
+        """Cleanly deny a handshake that hasn't been accept()ed yet -
+        never touches active_connections/_connection_users/_last_seen,
+        so a rejected connection can never end up stored anywhere.
+        Sending `websocket.close` before `websocket.accept` is a
+        standard ASGI/WebSocket handshake denial (the client sees the
+        upgrade fail, e.g. as an HTTP 403), not a post-accept
+        disconnect, so this deliberately does NOT go through
+        disconnect() - there is nothing in the manager's state to
+        clean up."""
+        try:
+            await websocket.close(code=WS_CLOSE_TRY_AGAIN_LATER, reason=reason)
+        except Exception:
+            # Client may have already given up on the handshake -
+            # either way, it was never registered, so there's nothing
+            # left to do.
+            pass
+        with self._metrics_lock:
+            self._disconnects_total["rejected_at_capacity"] = (
+                self._disconnects_total.get("rejected_at_capacity", 0) + 1
+            )
 
     def disconnect(self, websocket: WebSocket, reason: str = "unknown") -> None:
         """`reason` is a short, fixed label value for
@@ -750,7 +822,9 @@ class ConnectionManager:
         connection (network interruption, laptop sleep, wifi drop -
         anything that doesn't cleanly send a WebSocket close frame)
         could otherwise sit in active_connections indefinitely."""
-        if self._reaper_task is not None or self._loop is None:
+        if self._loop is None:
+            return
+        if self._reaper_task is not None and not self._reaper_task.done():
             return
         self._reaper_task = self._loop.create_task(self._reap_loop())
 

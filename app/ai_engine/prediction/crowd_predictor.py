@@ -20,30 +20,32 @@ instead of surfacing a 500.
 import logging
 import os
 from datetime import datetime, timezone
-from functools import lru_cache
 
-import joblib
 import numpy as np
 import pandas as pd
 
-from app.ai_engine.model_bundle import prune_to_winner
+from app.ai_engine import model_bundle
 from app.utils.timezone import to_business_time
 
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "crowd_model.pkl")
 
-@lru_cache(maxsize=1)
+# Every raw input this predictor can actually compute for a
+# (station_id, target_datetime) pair - see the feature construction in
+# predict_crowd()/predict_crowd_bulk() below. Used to validate a loaded
+# bundle's `features` list before trusting its column order (see
+# model_bundle.validate_feature_contract).
+KNOWN_FEATURES = {"station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"}
+
 def _load_model():
-    if not os.path.exists(MODEL_PATH):
-        print(f"[{__name__}] no trained model at {MODEL_PATH} - using heuristic fallback")
-        return None
-    try:
-        return prune_to_winner(joblib.load(MODEL_PATH))
-    except Exception as exc:
-                                                                     
-        print(f"[{__name__}] failed to load {MODEL_PATH}: {exc!r} - using heuristic fallback")
-        return None
+    # Thread-safe, load-once, lazy singleton shared via
+    # app.ai_engine.model_bundle's small fixed crowd/delay/frequency
+    # registry - see get_or_load() there for why a plain
+    # @lru_cache(maxsize=1) here wasn't enough to prevent two
+    # concurrent requests from both loading their own copy of the
+    # model on a cold cache.
+    return model_bundle.get_or_load("crowd", MODEL_PATH)
 
 def _heuristic(hour: int, is_weekend: int) -> float:
     morning_peak = np.exp(-((hour - 9) ** 2) / 4) * 900
@@ -121,6 +123,9 @@ def predict_crowd(
 
     if bundle is not None:
         try:
+            model_bundle.validate_feature_contract(
+                bundle["features"], KNOWN_FEATURES, context="crowd_predictor"
+            )
             features = pd.DataFrame(
                 [[station_id, hour, day_of_week, is_weekend, is_peak_hour]],
                 columns=bundle["features"],
@@ -211,6 +216,9 @@ def predict_crowd_bulk(station_ids: list[int], hours: list[int], target_date: da
     predicted = None
     if bundle is not None and rows:
         try:
+            model_bundle.validate_feature_contract(
+                bundle["features"], KNOWN_FEATURES, context="crowd_predictor.bulk"
+            )
             model = bundle["model"]
             features = pd.DataFrame(rows, columns=bundle["features"])
             predicted = model.predict(features)

@@ -1,29 +1,3 @@
-"""New (real-data) module - live evaluation metrics for the production
-train-frequency recommendation model.
-
-Powers the frequency section of the "AI Prediction" dashboard page,
-same role as crowd_metrics.py plays for the crowd/demand model.
-Everything below is computed from the REAL datasets/stations.csv and
-datasets/passenger_flow.csv and the REAL trained frequency_model.pkl -
-nothing is hardcoded.
-
-Design notes:
-- Rebuilds the exact same (station_id, hour, day_of_week, is_weekend,
-  is_peak_hour) -> recommended_frequency_minutes training table that
-  colab_training/train_frequency_model.py builds (real passenger_count
-  table from _real_dataset_builder.py, then the same
-  demand-to-headway derivation as train_frequency_model.py::
-  _derive_target), then re-creates its
-  train_test_split(test_size=0.2, random_state=42) to get the
-  identical held-out test rows.
-- Frequency recommendation is a pure regression target (minutes
-  between trains) - there's no natural class bucketing for it the way
-  crowd has CrowdLevel, so this only reports MAE/MAPE/R2 and feature
-  importance, unlike CrowdModelMetrics which also has
-  accuracy/macro_f1/confusion_matrix.
-- Cached for the life of the process - the dataset/model are static
-  files, so recomputing on every poll would be wasted CPU.
-"""
 import os
 from functools import lru_cache
 
@@ -34,9 +8,13 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "frequency_model.pkl")
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets")
+DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
+
+
+PASSENGER_FLOW_USECOLS = ["station_id", "hour", "day_of_week", "is_weekend", "entries", "exits"]
+CSV_CHUNK_SIZE = 100_000
 
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 TARGET = "recommended_frequency_minutes"
@@ -44,7 +22,13 @@ TARGET = "recommended_frequency_minutes"
 MIN_FREQUENCY = 3
 MAX_FREQUENCY = 15
 
-DISPLAY_NAMES = {"random_forest": "Random Forest", "xgboost": "XGBoost"}
+DISPLAY_NAMES = {
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+
+    "random_forest_tuned": "Random Forest",
+    "xgboost_tuned": "XGBoost",
+}
 
 def _station_id_map() -> dict[str, int]:
     """Same cleaning/ordering as colab_training/_real_dataset_builder.py
@@ -72,21 +56,40 @@ def _station_id_map() -> dict[str, int]:
     return dict(zip(stations["station_id"], stations["int_station_id"]))
 
 def _crowd_table(station_id_map: dict) -> pd.DataFrame:
-    df = pd.read_csv(PASSENGER_FLOW_CSV)
-    df["station_id"] = df["station_id"].astype(str).str.strip().map(station_id_map)
-    df = df.dropna(subset=["station_id"])
-    df["station_id"] = df["station_id"].astype(int)
+    """MEMORY FIX: streams passenger_flow.csv.gz in bounded
+    CSV_CHUNK_SIZE-row chunks (only PASSENGER_FLOW_USECOLS columns)
+    and reduces each chunk to a partial sum/count per (station_id,
+    hour, day_of_week, is_weekend, is_peak_hour) group immediately,
+    instead of materializing the whole file as one DataFrame. The
+    partial sums are combined and divided once at the end (mean =
+    sum/count, rounded to int) in the same sorted group-key order a
+    single-shot groupby(...).mean() would produce, so the result is
+    unchanged - only one CSV_CHUNK_SIZE-row chunk plus these small
+    running per-group totals are ever resident in memory at once."""
+    partial_group_sums: list[pd.DataFrame] = []
+    group_keys = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 
-    df["entries"] = df["entries"].clip(lower=0)
-    df["exits"] = df["exits"].clip(lower=0)
-    df["passenger_count"] = df["entries"] + df["exits"]
-    df["is_peak_hour"] = ((df["hour"].between(8, 11)) | (df["hour"].between(17, 20))).astype(int)
+    for chunk in pd.read_csv(PASSENGER_FLOW_CSV, usecols=PASSENGER_FLOW_USECOLS, chunksize=CSV_CHUNK_SIZE):
+        chunk = chunk.copy()
+        chunk["station_id"] = chunk["station_id"].astype(str).str.strip().map(station_id_map)
+        chunk = chunk.dropna(subset=["station_id"])
+        chunk["station_id"] = chunk["station_id"].astype(int)
 
-    grouped = (
-        df.groupby(["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"])
-        ["passenger_count"].mean().round().astype(int).reset_index()
-    )
-    return grouped
+        chunk["entries"] = chunk["entries"].clip(lower=0)
+        chunk["exits"] = chunk["exits"].clip(lower=0)
+        chunk["passenger_count"] = chunk["entries"] + chunk["exits"]
+        chunk["is_peak_hour"] = ((chunk["hour"].between(8, 11)) | (chunk["hour"].between(17, 20))).astype(int)
+
+        chunk_grouped = chunk.groupby(group_keys)["passenger_count"].agg(["sum", "count"]).reset_index()
+        partial_group_sums.append(chunk_grouped)
+
+    if not partial_group_sums:
+        return pd.DataFrame(columns=group_keys + ["passenger_count"])
+
+    combined = pd.concat(partial_group_sums, ignore_index=True)
+    combined = combined.groupby(group_keys)[["sum", "count"]].sum().reset_index()
+    combined["passenger_count"] = (combined["sum"] / combined["count"]).round().astype(int)
+    return combined[group_keys + ["passenger_count"]].sort_values(group_keys).reset_index(drop=True)
 
 def _derive_target(df: pd.DataFrame) -> pd.DataFrame:
     """Identical to train_frequency_model.py::_derive_target - higher
@@ -184,8 +187,13 @@ def compute_frequency_metrics() -> dict:
             evaluated["model_name"] = DISPLAY_NAMES.get(name, name)
             models_out[name] = evaluated
 
-        best = models_out.get(trained_name) or next(iter(models_out.values()))
-        display_name = DISPLAY_NAMES.get(trained_name, trained_name)
+        scored = [(name, m) for name, m in models_out.items() if m.get("mae") is not None]
+        if scored:
+            winner_name, best = min(scored, key=lambda item: item[1]["mae"])
+        else:
+            winner_name = trained_name
+            best = models_out.get(trained_name) or next(iter(models_out.values()))
+        display_name = DISPLAY_NAMES.get(winner_name, winner_name)
 
         return {
             "available": True,

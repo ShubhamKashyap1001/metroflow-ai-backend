@@ -1,13 +1,15 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core import cache
 from app.enums.crowd_level import CrowdLevel
 from app.models.crowd_log import CrowdLog
+from app.models.line_station import LineStation
+from app.models.metro_line import MetroLine
 from app.models.station import Station
 from app.models.station_crowd_state import StationCrowdState
 from app.schemas.crowd_log import CrowdLogCreate
@@ -216,16 +218,39 @@ def _get_station_wise_snapshot_from_db(db: Session, state: str | None = None) ->
     running a ROW_NUMBER() OVER (...) window query over the much
     larger, ever-growing crowd_logs table. Same output shape as
     before - this is a data-source swap, not a behaviour change."""
+    # MAP FIX (crowd heatmap: unreadable pile-up of station dots/labels):
+    # the heatmap/dashboard maps draw a polyline connecting every
+    # station on the same metro line (see mapLines.ts on the frontend),
+    # but this query never told the frontend which line a station
+    # belongs to - so that feature silently did nothing and the map had
+    # no structure to organise ~280+ stations by. Left-joining
+    # line_stations -> metro_lines here (a station has at most one line
+    # row in this schema; interchanges are modelled as one `stations`
+    # row per line, see the dedupe note in get_heatmap below) gives the
+    # frontend line_name/line_color/station_order so it can draw real
+    # line paths and no longer has to dump every station into one
+    # undifferentiated blob.
     query = (
         db.query(
             Station,
             StationCrowdState.current_count,
             StationCrowdState.crowd_level,
             StationCrowdState.updated_at,
+            MetroLine.line_name,
+            MetroLine.color,
+            LineStation.station_order,
         )
         .outerjoin(
             StationCrowdState,
             StationCrowdState.station_id == Station.id,
+        )
+        .outerjoin(
+            LineStation,
+            LineStation.station_id == Station.id,
+        )
+        .outerjoin(
+            MetroLine,
+            MetroLine.id == LineStation.line_id,
         )
         .filter(Station.is_active.is_(True))
     )
@@ -237,7 +262,15 @@ def _get_station_wise_snapshot_from_db(db: Session, state: str | None = None) ->
     rows = query.all()
 
     snapshot = []
-    for station, current_count, crowd_level, last_updated in rows:
+    for (
+        station,
+        current_count,
+        crowd_level,
+        last_updated,
+        line_name,
+        line_color,
+        station_order,
+    ) in rows:
         current_count = current_count or 0
         snapshot.append({
             "station_id": station.id,
@@ -250,6 +283,9 @@ def _get_station_wise_snapshot_from_db(db: Session, state: str | None = None) ->
             "last_updated": last_updated,
             "latitude": station.latitude,
             "longitude": station.longitude,
+            "line_name": line_name,
+            "line_color": line_color,
+            "station_order": station_order,
         })
     return snapshot
 
@@ -260,6 +296,11 @@ def get_heatmap(db: Session, state: str | None = None, limit: int | None = None)
         if entry["latitude"] is not None
         and entry["longitude"] is not None
         and not (entry["latitude"] == 0 and entry["longitude"] == 0)
+        # A station with no (or 0) capacity has no meaningful occupancy
+        # percentage - it can only ever render as a stray "0%" dot that
+        # clutters the map without telling the viewer anything. Drop it
+        # from the heatmap entirely instead of plotting a useless point.
+        and (entry.get("capacity") or 0) > 0
     ]
 
     # BUGFIX (dashboard: same station plotted twice on the heatmap):
@@ -298,51 +339,111 @@ def get_congested_stations(
     ]
 
 
+def crowd_flow_aggregate(
+    db: Session, station_ids: list[int], since: datetime
+) -> dict[int, dict]:
+    """Inflow/outflow/sample-count/last-known-count per station since
+    `since`, computed ENTIRELY in SQL via window functions + GROUP BY,
+    instead of pulling every raw CrowdLog row in the window into
+    Python and walking it with a running-previous-count loop.
+
+    RAM FIX (Render Free 512MB): the previous approach - `SELECT
+    station_id, current_count [, created_at] ... WHERE created_at >=
+    :since` then `.all()` - was already scoped by station_ids and a
+    clamped time window (see MAX_HISTORY_WINDOW_HOURS above), but nothing
+    bounded the *row count* returned within that window. At the
+    simulator's CROWD_HISTORY_INTERVAL_SECONDS sampling rate, a
+    legitimate-looking request for the maximum allowed window (30 days)
+    across every active station can still mean materializing millions
+    of CrowdLog rows as Python tuples in one request - exactly the
+    "large query loads excessive history into Python RAM" failure mode
+    this fix targets, just reached through an oversized `hours` value
+    rather than a missing LIMIT.
+
+    This query returns at most one aggregated row PER STATION (a small,
+    fixed-size result - one row per station in `station_ids`) no matter
+    how many raw samples exist in the window or how wide the window is;
+    Postgres does the per-row delta/ordering work and only ships back
+    the already-summed totals. The computed inflow/outflow/samples
+    values are exactly the same numbers the old Python loop produced:
+    that loop routed a delta of exactly 0 into its `else` (outflow)
+    branch, contributing `abs(0) == 0` either way, which is the same
+    as this query's `delta > 0` / `delta < 0` split (0 falls into
+    neither `CASE`, contributing 0 to both) - only *how* the totals
+    are computed changed, not *what* they mean.
+
+    `last_count` is the most recent sample's current_count within the
+    window (ROW_NUMBER() over each station ordered by created_at DESC,
+    keeping rn = 1) - used by analytics_service.passenger_flow_overview
+    for its occupancy KPI, which previously had to keep the last row it
+    saw while looping over every raw row for the same reason.
+    """
+    if not station_ids:
+        return {}
+
+    ordered = (
+        db.query(
+            CrowdLog.station_id.label("station_id"),
+            CrowdLog.current_count.label("current_count"),
+            func.lag(CrowdLog.current_count)
+            .over(partition_by=CrowdLog.station_id, order_by=CrowdLog.created_at.asc())
+            .label("prev_count"),
+            func.row_number()
+            .over(partition_by=CrowdLog.station_id, order_by=CrowdLog.created_at.desc())
+            .label("rn_desc"),
+        )
+        .filter(CrowdLog.station_id.in_(station_ids), CrowdLog.created_at >= since)
+        .subquery()
+    )
+
+    delta = ordered.c.current_count - ordered.c.prev_count
+    rows = (
+        db.query(
+            ordered.c.station_id,
+            func.count().label("samples"),
+            func.coalesce(func.sum(case((delta > 0, delta), else_=0)), 0).label("inflow"),
+            func.coalesce(func.sum(case((delta < 0, -delta), else_=0)), 0).label("outflow"),
+            func.max(
+                case((ordered.c.rn_desc == 1, ordered.c.current_count), else_=None)
+            ).label("last_count"),
+        )
+        .group_by(ordered.c.station_id)
+        .all()
+    )
+
+    return {
+        row.station_id: {
+            "inflow": int(row.inflow or 0),
+            "outflow": int(row.outflow or 0),
+            "samples": int(row.samples or 0),
+            "last_count": row.last_count,
+        }
+        for row in rows
+    }
+
 def get_inflow_outflow_bulk(
     db: Session, station_ids: list[int], hours: int = 1
 ) -> dict[int, dict]:
     """Same in/out delta logic as get_inflow_outflow(), computed for many
     stations in a single query instead of one round-trip per station -
     used by get_station_monitor() for the dashboard's Live Station
-    Monitor widget so listing N stations doesn't cost N+1 queries."""
+    Monitor widget so listing N stations doesn't cost N+1 queries.
+
+    See crowd_flow_aggregate() above for how this stays bounded to one
+    row per station regardless of the window's raw sample count."""
     result: dict[int, dict] = {sid: {"inflow": 0, "outflow": 0, "samples": 0} for sid in station_ids}
     if not station_ids:
         return result
 
     hours = _clamp_hours(hours)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    # PERF FIX (query-analysis pass, see docs/query-performance-and-indexing.md):
-    # this was `db.query(CrowdLog)` - the full mapped entity (id,
-    # station_id, current_count, crowd_level, created_at, updated_at) -
-    # even though only station_id and current_count are ever read
-    # below (created_at is used solely to ORDER BY, which doesn't
-    # require it to be selected). Verified as the 2nd-slowest query in
-    # the app under realistic data volume: EXPLAIN ANALYZE showed the
-    # same index-optimal plan as the trimmed projection used by
-    # analytics_service.passenger_flow_overview()'s equivalent query,
-    # just paying to hydrate 2-3x more column data per row for a
-    # station-monitor call that can return thousands of rows. Selecting
-    # only the columns actually used cuts that hydration/transfer cost
-    # without changing the query's plan or results.
-    logs = (
-        db.query(CrowdLog.station_id, CrowdLog.current_count)
-        .filter(CrowdLog.station_id.in_(station_ids), CrowdLog.created_at >= since)
-        .order_by(CrowdLog.station_id.asc(), CrowdLog.created_at.asc())
-        .all()
-    )
-
-    previous_by_station: dict[int, int] = {}
-    for log in logs:
-        entry = result[log.station_id]
-        entry["samples"] += 1
-        previous_count = previous_by_station.get(log.station_id)
-        if previous_count is not None:
-            delta = log.current_count - previous_count
-            if delta > 0:
-                entry["inflow"] += delta
-            else:
-                entry["outflow"] += abs(delta)
-        previous_by_station[log.station_id] = log.current_count
+    aggregate = crowd_flow_aggregate(db, station_ids, since)
+    for station_id, values in aggregate.items():
+        result[station_id] = {
+            "inflow": values["inflow"],
+            "outflow": values["outflow"],
+            "samples": values["samples"],
+        }
 
     return result
 
@@ -366,33 +467,19 @@ def get_station_monitor(db: Session, state: str | None = None, hours: int = 1) -
 
 
 def get_inflow_outflow(db: Session, station_id: int, hours: int = 24) -> dict:
+    """See crowd_flow_aggregate() above for how this stays bounded to a
+    single aggregated row regardless of the window's raw sample count."""
     hours = _clamp_hours(hours)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    logs = (
-        db.query(CrowdLog)
-        .filter(CrowdLog.station_id == station_id, CrowdLog.created_at >= since)
-        .order_by(CrowdLog.created_at.asc())
-        .all()
-    )
-
-    inflow = 0
-    outflow = 0
-    previous_count = None
-    for log in logs:
-        if previous_count is not None:
-            delta = log.current_count - previous_count
-            if delta > 0:
-                inflow += delta
-            else:
-                outflow += abs(delta)
-        previous_count = log.current_count
+    aggregate = crowd_flow_aggregate(db, [station_id], since)
+    values = aggregate.get(station_id, {"inflow": 0, "outflow": 0, "samples": 0})
 
     return {
         "station_id": station_id,
         "window_hours": hours,
-        "inflow": inflow,
-        "outflow": outflow,
-        "samples": len(logs),
+        "inflow": values["inflow"],
+        "outflow": values["outflow"],
+        "samples": values["samples"],
     }
 
 def get_station_analytics(db: Session, station_id: int) -> dict:
