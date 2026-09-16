@@ -1,0 +1,200 @@
+{
+  "available": true,
+  "model_name": "XGBoost",
+  "mae": 279.86,
+  "mape_pct": 37.53,
+  "r2": 0.8404,
+  "accuracy": 0.895,
+  "macro_f1": 0.7455,
+  "critical_recall": 0.9162,
+  "trained_rows": 37296,
+  "test_rows": 9324,
+  "classes": [
+    "low",
+    "moderate",
+    "high",
+    "critical"
+  ],
+  "confusion_matrix": [
+    [
+      6376,
+      221,
+      16,
+      5
+    ],
+    [
+      276,
+      562,
+      59,
+      32
+    ],
+    [
+      3,
+      153,
+      226,
+      106
+    ],
+    [
+      4,
+      32,
+      72,
+      1181
+    ]
+  ],
+  "feature_importance": [
+    {
+      "feature": "is_peak_hour",
+      "importance": 0.7745425701141357
+    },
+    {
+      "feature": "station_id",
+      "importance": 0.16660209000110626
+    },
+    {
+      "feature": "day_of_week",
+      "importance": 0.03497609496116638
+    },
+    {
+      "feature": "hour",
+      "importance": 0.02387929894030094
+    },
+    {
+      "feature": "is_weekend",
+      "importance": 0.0
+    }
+  ],
+  "models": {
+    "xgboost_tuned": {
+      "available": true,
+      "mae": 279.86,
+      "mape_pct": 37.53,
+      "r2": 0.8404,
+      "accuracy": 0.895,
+      "macro_f1": 0.7455,
+      "critical_recall": 0.9162,
+      "trained_rows": 37296,
+      "test_rows": 9324,
+      "classes": [
+        "low",
+        "moderate",
+        "high",
+        "critical"
+      ],
+      "confusion_matrix": [
+        [
+          6376,
+          221,
+          16,
+          5
+        ],
+        [
+          276,
+          562,
+          59,
+          32
+        ],
+        [
+          3,
+          153,
+          226,
+          106
+        ],
+        [
+          4,
+          32,
+          72,
+          1181
+        ]
+      ],
+      "feature_importance": [
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.7745425701141357
+        },
+        {
+          "feature": "station_id",
+          "importance": 0.16660209000110626
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.03497609496116638
+        },
+        {
+          "feature": "hour",
+          "importance": 0.02387929894030094
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.0
+        }
+      ],
+      "model_name": "XGBoost"
+    },
+    "random_forest": {
+      "available": true,
+      "mae": 429.73,
+      "mape_pct": 56.25,
+      "r2": 0.8112,
+      "accuracy": 0.8134,
+      "macro_f1": 0.5458,
+      "critical_recall": 0.834,
+      "trained_rows": 37296,
+      "test_rows": 9324,
+      "classes": [
+        "low",
+        "moderate",
+        "high",
+        "critical"
+      ],
+      "confusion_matrix": [
+        [
+          6118,
+          422,
+          75,
+          3
+        ],
+        [
+          484,
+          363,
+          65,
+          17
+        ],
+        [
+          62,
+          187,
+          28,
+          211
+        ],
+        [
+          8,
+          129,
+          77,
+          1075
+        ]
+      ],
+      "feature_importance": [
+        {
+          "feature": "station_id",
+          "importance": 0.6811634721832578
+        },
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.16169170715444292
+        },
+        {
+          "feature": "hour",
+          "importance": 0.0643281729255984
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.047779579742221
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.04503706799447983
+        }
+      ],
+      "model_name": "Random Forest"
+    }
+  }
+}

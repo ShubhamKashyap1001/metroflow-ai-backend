@@ -17,9 +17,6 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 logger = logging.getLogger(__name__)
 
 from app.core import log_buffer, metrics
-# Attach the in-memory log ring buffer as early as possible so it
-# captures startup-time log records too (model warmup, simulator
-# boot, etc.), not just requests handled after the app is "ready".
 log_buffer.install()
 
 from app.api.v1 import (
@@ -37,6 +34,7 @@ from app.api.v1 import (
     news,
     notifications,
     prediction,
+    saved_routes,
     schedule,
     station,
     trains,
@@ -65,43 +63,13 @@ from app.websocket.manager import manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.bind_loop(asyncio.get_running_loop())
-    # Subscribe THIS process to the cross-process WebSocket
-    # relay so its own clients get every event - simulator ticks AND
-    # request-triggered alerts/notifications/delays/check-in updates -
-    # even when a different worker process generated it (see
-    # app/websocket/manager.py's start_relay/broadcast and
-    # app/simulator/leader_election.py). No-op if Redis is unavailable.
     manager.start_relay()
-    # Proactively reap WebSocket connections that have gone
-    # silent (network interruption, sleeping laptop, etc.) instead of
-    # only noticing them the next time a broadcast happens to try (and
-    # fail) to send to them. See ConnectionManager.start_reaper.
     manager.start_reaper()
 
-    # Load the 3 .pkl model bundles now, during startup, instead of
-    # letting the first real prediction request pay that cost (see
-    # app/ai_engine/warmup.py). Runs in a worker thread so a slow disk
-    # read can't block the event loop from coming up.
-    #
-    # Gated behind AI_EAGER_WARMUP (default False - see
-    # app/core/config.py): loading all 3 bundles back-to-back during
-    # boot, on top of importing numpy/pandas/scipy/scikit-learn/
-    # xgboost, is exactly the kind of startup memory spike that trips
-    # a 512MB free-tier instance's OOM killer. With this off, each
-    # predictor still lazy-loads (and caches) itself on its own first
-    # use - the simulator's first tick, or the first real API request
-    # - so the same memory cost is paid, just spread out instead of
-    # all at once at boot.
     if settings.AI_EAGER_WARMUP:
         from app.ai_engine.warmup import warm_up_models
         await asyncio.to_thread(warm_up_models)
 
-    # Phase 11: resume any alert email/SMS dispatch a previous process
-    # left QUEUED or IN_PROGRESS (deploy, crash, hard kill) before this
-    # process starts serving traffic - see
-    # app/services/notification_dispatch_queue.py and
-    # app/models/notification_dispatch_job.py. Runs in a worker thread
-    # since it does blocking DB I/O.
     resumed = await asyncio.to_thread(notification_dispatch_queue.recover_pending_jobs)
     if resumed:
         logger.warning(
@@ -130,11 +98,6 @@ async def lifespan(app: FastAPI):
         await stop_notification_bin_retention_job()
     manager.stop_relay()
     await manager.stop_reaper()
-    # Let any in-flight email/SMS dispatch finish (bounded by
-    # their own 15s socket timeouts) rather than abandoning it
-    # mid-send. Runs after everything else so it doesn't delay the
-    # rest of shutdown on a quiet process (nothing in flight = returns
-    # immediately).
     notification_executor.shutdown(wait=True)
 
 app = FastAPI(
@@ -145,32 +108,15 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler_with_retry_after)
-# Required for `limiter`'s default_limits (and any @limiter.limit(...) on a
-# route) to actually be enforced - see app/core/rate_limit.py's module
-# docstring. This is a BaseHTTPMiddleware subclass, so it only wraps "http"
-# scope requests; the "/ws/monitor" WebSocket route below is untouched by it.
 app.add_middleware(SlowAPIMiddleware)
 
 @app.exception_handler(SATimeoutError)
 async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
-    """The DB connection pool (DB_POOL_SIZE + DB_MAX_OVERFLOW) had no
-    free connection within DB_POOL_TIMEOUT seconds. Without this
-    handler, that exception was unhandled: it printed a full traceback
-    to the terminal on every occurrence and returned a bare 500, and
-    because it took the full pool_timeout to surface, requests piled
-    up behind it, making the whole app look frozen/crashed under load
-    instead of a single endpoint failing cleanly. This logs it once
-    (no traceback spam) and returns a fast, clear 503 the frontend's
-    existing retry logic already knows how to handle."""
     logger.error("[db] connection pool exhausted on %s - consider raising DB_POOL_SIZE/DB_MAX_OVERFLOW "
                   "or checking for a slow query/unreachable DB.", request.url.path)
-    # A pool checkout timeout never reaches a DBAPI call, so it never
-    # fires database.py's `handle_error` engine event - this is the
-    # only place it's ever recorded.
     metrics.record_db_failure("pool_exhausted")
 
     try:
-                                                                    
         notif_db = SessionLocal()
         try:
             notification_service.create_notification(
@@ -183,7 +129,6 @@ async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
         finally:
             notif_db.close()
     except Exception:
-                                                                     
         pass
 
     return JSONResponse(
@@ -217,7 +162,6 @@ app.add_middleware(
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     if request.url.path == "/metrics":
-        # Don't record scrapes of the metrics endpoint itself.
         return await call_next(request)
 
     start = time.perf_counter()
@@ -239,23 +183,10 @@ async def metrics_middleware(request: Request, call_next):
             method=request.method, route=route
         ).observe(duration_seconds)
 
-# Registered LAST (= outermost layer, runs FIRST on every incoming
-# request) so an oversized body is rejected before CORS, rate
-# limiting, or the metrics middleware above ever touch it - see
-# app/core/request_limits.py. Only wraps "http" scope requests;
-# "/ws/monitor" (a WebSocket route) is unaffected.
 app.add_middleware(MaxBodySizeMiddleware, max_body_size=settings.MAX_REQUEST_BODY_BYTES)
 
 @app.get("/metrics", include_in_schema=False)
 def metrics_endpoint():
-    """Prometheus scrape target - no auth, same as /health, matching
-    how Prometheus itself scrapes (no easy way for it to send a Bearer
-    token) and how this class of endpoint is conventionally deployed
-    (protected at the network layer, not the app layer). Safe to leave
-    open regardless: every metric here is an aggregate counter/
-    histogram over safe labels only (route templates, exception class
-    names, status codes) - see app/core/metrics.py's module docstring
-    for exactly what is and isn't ever used as a label value."""
     body, content_type = metrics.render_latest()
     return Response(content=body, media_type=content_type)
 
@@ -270,6 +201,7 @@ app.include_router(crowd.router, prefix=API_PREFIX)
 app.include_router(checkin.router, prefix=API_PREFIX)
 app.include_router(checkout.router, prefix=API_PREFIX)
 app.include_router(schedule.router, prefix=API_PREFIX)
+app.include_router(saved_routes.router, prefix=API_PREFIX)
 app.include_router(prediction.router, prefix=API_PREFIX)
 app.include_router(analytics.router, prefix=API_PREFIX)
 app.include_router(alerts.router, prefix=API_PREFIX)
@@ -290,34 +222,12 @@ def home():
 
 @app.api_route('/healthz', methods=["GET", "HEAD"])
 def healthz():
-    """Plain liveness probe - deliberately does NOT touch the database
-    (that's what /api/v1/health/ is for, as a readiness check). This is
-    just "is the process up and serving requests", the convention path
-    most container/orchestrator liveness checks (Docker, Kubernetes,
-    Render, etc.) look for by default."""
     return {"status": "ok"}
 
 _WS_AUTH_SUBPROTOCOL = "access_token"
 
 @app.websocket("/ws/monitor")
 async def websocket_monitor(websocket: WebSocket):
-    """Auth is optional so existing public/anonymous usage (crowd and
-    train-position broadcasts) keeps working unauthenticated. When a
-    token is present it's decoded with the same Supabase verification
-    used on REST requests, and the connection is registered under that
-    user_id so notification_service can target them directly (see
-    ConnectionManager.notify_user).
-
-    The token travels via the `Sec-WebSocket-Protocol` header, not the
-    URL's `?token=` query string: browsers can't set custom headers on
-    a WS upgrade request, but the subprotocol list is exactly this
-    kind of small out-of-band handshake data, and - unlike a query
-    string - it's never written to server access logs, proxy logs,
-    Referer headers, or browser history. The client offers two
-    subprotocol values, a fixed marker plus the token itself; we read
-    both off the header here and, if present, echo the marker back as
-    the single accepted subprotocol (required by the handshake spec
-    whenever the client sent the header)."""
     offered = [
         p.strip()
         for p in (websocket.headers.get("sec-websocket-protocol") or "").split(",")
@@ -343,42 +253,17 @@ async def websocket_monitor(websocket: WebSocket):
         subprotocol=accepted_subprotocol,
     )
     if not accepted:
-        # Over WS_MAX_CONNECTIONS/WS_MAX_CONNECTIONS_PER_USER - the
-        # socket has already been closed (WS close code 1013, "try
-        # again later") by manager.connect()/_reject() without ever
-        # being accept()ed or registered anywhere, so there's nothing
-        # more to do here. Every already-connected client is
-        # unaffected.
         return
-    # Labels the eventual manager.disconnect() call below for
-    # ws_disconnects_total (see app/core/metrics.py) - purely
-    # observational, doesn't change which exceptions are caught or
-    # how they propagate.
     disconnect_reason = "client_close"
     try:
         while True:
             raw = await websocket.receive_text()
-            # Any inbound frame is proof this connection is
-            # alive - record it so the reaper doesn't treat it as
-            # stale (see ConnectionManager.record_activity/_reap_stale).
             manager.record_activity(websocket)
             try:
                 message = json.loads(raw)
             except (TypeError, ValueError):
                 message = None
             if isinstance(message, dict) and message.get("type") == "ping":
-                # Actually answer the client's own heartbeat
-                # ping. Previously this loop only ever called
-                # receive_text() and discarded whatever came back, so
-                # the frontend's own heartbeat-timeout logic (which
-                # treats ANY inbound message as a satisfied heartbeat -
-                # see LiveSocketProvider.tsx's onmessage handler) was,
-                # by accident, only ever satisfied if an unrelated
-                # broadcast happened to land in the same ~10s window.
-                # On a quiet page with no crowd/train activity that
-                # window could be missed, causing the client to
-                # needlessly close and reconnect a perfectly healthy
-                # socket.
                 try:
                     await websocket.send_text(json.dumps({"event": "pong", "data": {}}))
                 except Exception:
@@ -386,19 +271,7 @@ async def websocket_monitor(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception:
-        # Same "any other exception" case the comment below already
-        # describes - labeled distinctly from a clean client close so
-        # ws_disconnects_total can tell the two apart. Re-raised
-        # unchanged: this handler only sets a label, it doesn't
-        # swallow anything the code didn't already let through.
         disconnect_reason = "error"
         raise
     finally:
-        # Unconditional cleanup. Previously disconnect() was
-        # only called inside `except WebSocketDisconnect` - any OTHER
-        # exception escaping receive_text()/send_text() (e.g. the
-        # transport erroring out on an abrupt close instead of a clean
-        # disconnect handshake) skipped cleanup entirely, leaking the
-        # connection into active_connections/_connection_users forever
-        # (a stale-connection bug in its own right).
         manager.disconnect(websocket, reason=disconnect_reason)

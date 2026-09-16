@@ -107,19 +107,34 @@ cancelled by the server itself, raising a normal, catchable
 `sqlalchemy.exc.OperationalError` — protecting the connection from
 ever getting stuck, one layer earlier than `pool_timeout` alone would.
 
-## Pool sizing — audited, deliberately left unchanged
+## Pool sizing — Step 7 OOM fix: tightened again for Render Free (512MB)
 
-`DB_POOL_SIZE=15`, `DB_MAX_OVERFLOW=25` → 40 connections per process.
-**Do not blindly increase these** — raising them without fixing the
-actual bug above (long connection holds during alert dispatch) would
-only mask the symptom, consume more of Postgres's own connection
-budget, and make the same bug harder to notice next time it mattered.
+Current defaults (`app/core/config.py`): `DB_POOL_SIZE=3`,
+`DB_MAX_OVERFLOW=2` → 5 connections per process (`WEB_CONCURRENCY=1`).
+This is the second tightening pass — an earlier pass had already
+lowered the original `15`/`25` (40-connection) defaults to `5`/`5`
+(10-connection); measurement on Render Free showed even that 10-slot
+ceiling was more headroom than one worker process needs, and every
+pooled connection carries its own psycopg2/libpq client-side buffers
+that count against the 512MB limit whether or not it's ever checked
+out — so the ceiling itself is memory pressure, not just a safety
+margin.
 
-`pool_timeout=10s` bounds how long a request waits for a connection
-before failing controllably (503 via `db_pool_exhausted_handler`).
-`pool_recycle=300s` is reasonable for hosted Postgres providers that
-drop idle connections on their own schedule. `pool_pre_ping=True` is
-already correct.
+**Do not blindly increase these** — raising them without first
+checking for a connection-holding bug like the alert-dispatch one
+above would only mask the symptom, consume more of Postgres's own
+connection budget, and make the same bug harder to notice next time it
+mattered.
+
+`pool_timeout=15s` (was `10s`) bounds how long a request waits for a
+connection before failing controllably (503 via
+`db_pool_exhausted_handler`) — nudged up slightly since there are now
+fewer slots to wait for. `pool_recycle=1800s` (was `300s`) recycles
+pooled connections every 30 minutes instead of every 5; the shorter
+value was needlessly churning fresh connections (each reconnect
+briefly allocates its own setup buffers), and 30 minutes still
+comfortably beats hosted-Postgres idle-kill windows. `pool_pre_ping=True`
+is unchanged and already correct.
 
 ## Worker × pool capacity: refusing to boot an unsafe configuration
 
@@ -160,11 +175,12 @@ Fixed with:
     to boot if the config is unsafe. If `max_connections` couldn't be
     determined, falls back to logging the formula instead of blocking.
 
-No default numeric value was changed — at the shipped defaults
-(`WEB_CONCURRENCY=1`) against a typical `max_connections=100`
-Postgres, the check passes with room to spare (`40 ≤ 90`); it only
-refuses to start when an operator's own scaling choice (more workers,
-or a smaller Postgres tier) would actually be unsafe.
+This capacity check's own logic wasn't changed by the Step 7 pool
+tightening above — at the shipped defaults (`WEB_CONCURRENCY=1`)
+against a typical `max_connections=100` Postgres, it passes with even
+more room to spare now (`5 ≤ 90`, down from `10 ≤ 90` before this
+step); it only refuses to start when an operator's own scaling choice
+(more workers, or a smaller Postgres tier) would actually be unsafe.
 
 ## Simulator loop session hygiene
 

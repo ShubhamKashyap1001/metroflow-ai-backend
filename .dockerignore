@@ -14,3 +14,8 @@ colab_training/
 scripts/
 *.md
 .DS_Store
+# STEP 3 PART 1: full-fidelity, multi-candidate crowd bundle used only
+# by the offline scripts/generate_model_metrics.py regeneration flow
+# (already excluded above) - never read by the running app, which
+# loads the winner-only app/ai_engine/saved_models/crowd_model.pkl.
+app/ai_engine/saved_models/crowd_model_full.pkl

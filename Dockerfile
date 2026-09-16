@@ -75,4 +75,24 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Render/ECS/EC2 all set $PORT (or you can hardcode 8000) - default to
 # 8000 for docker-compose / plain `docker run` use.
 ENV PORT=8000
+
+# MALLOC_ARENA_MAX: glibc's malloc creates a separate memory arena per
+# thread by default (up to 8x the CPU count it detects). numpy/pandas/
+# scikit-learn/xgboost all allocate through glibc malloc for every
+# DataFrame/array built per request (crowd/delay/frequency prediction,
+# the simulator's per-tick predict_crowd(light=True) calls, dashboard
+# metrics evaluation) - each arena fragments independently and glibc
+# almost never returns freed arena memory back to the OS, so process
+# RSS climbs slowly and monotonically over the life of the process even
+# though the app has WEB_CONCURRENCY=1 (one Python-level worker) and no
+# logical Python-level leak. This is what shows up as "gradual OOM,
+# then crash" on a fixed-memory host like Render's free tier - not a
+# code bug, an allocator behavior. Capping arenas to 2 forces malloc to
+# reuse/coalesce the same small pool of arenas instead of growing new
+# ones, which is the standard fix for this class of slow RSS growth in
+# containerized Python/native-extension workloads. Safe no-op for any
+# code path that doesn't hit this pattern; only costs a small amount of
+# extra lock contention under heavy concurrent allocation, which this
+# single-worker, single-row-inference workload never approaches.
+ENV MALLOC_ARENA_MAX=2
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers ${WEB_CONCURRENCY:-1}"]

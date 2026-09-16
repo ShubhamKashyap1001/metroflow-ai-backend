@@ -9,16 +9,34 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
-    # Lowered from 15/25 -> 5/5: on a 512MB free-tier instance (e.g.
-    # Render's free plan) a 40-connection ceiling is far more than one
-    # worker process needs and each connection carries its own client-
-    # side buffers, so this trims idle memory overhead. Raise these
-    # back up via env vars once you're on a bigger instance / see pool
-    # -exhaustion 503s under real load.
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 5
-    DB_POOL_TIMEOUT: int = 10
-    DB_POOL_RECYCLE: int = 300
+    # Step 7 (OOM fix): lowered again from 5/5/10/300 -> 3/2/15/1800.
+    # Original history: 15/25 -> 5/5 already trimmed the ceiling once
+    # for a 512MB Render Free instance (see docs/database-sessions-and
+    # -connection-pooling.md). Measurement on Render Free showed even
+    # a 10-connection ceiling (5+5) was more headroom than
+    # WEB_CONCURRENCY=1 ever needs in practice, and every pooled
+    # connection carries its own psycopg2/libpq client-side buffers
+    # that count against the 512MB limit whether or not it's ever
+    # checked out - so the ceiling itself is memory pressure, not just
+    # a safety margin.
+    #   pool_size=3, max_overflow=2 -> 5-connection per-process ceiling
+    #     (down from 10), still comfortably above what this app's
+    #     request volume needs on a free instance.
+    #   pool_timeout=15 (was 10) -> a little more slack for a request
+    #     to wait for one of the now-fewer slots before failing with
+    #     the existing db_pool_exhausted_handler 503, instead of
+    #     failing faster than necessary.
+    #   pool_recycle=1800 (was 300) -> recycling every 5 minutes was
+    #     needlessly churning fresh connections (each reconnect briefly
+    #     allocates its own setup buffers); 30 minutes still comfortably
+    #     beats hosted-Postgres idle-kill windows while reducing that
+    #     churn.
+    # Raise these back up via env vars once on a bigger instance, or if
+    # pool-exhaustion 503s appear under real load.
+    DB_POOL_SIZE: int = 3
+    DB_MAX_OVERFLOW: int = 2
+    DB_POOL_TIMEOUT: int = 15
+    DB_POOL_RECYCLE: int = 1800
 
     DB_STATEMENT_TIMEOUT_MS: int = 30_000
 
@@ -215,7 +233,21 @@ class Settings(BaseSettings):
     # many notification batches can be sending at once; it is
     # deliberately NOT the same knob as DB_POOL_SIZE/DB_MAX_OVERFLOW
     # or AnyIO's thread limiter. See docs/notification-delivery.md.
-    NOTIFICATION_DISPATCH_WORKERS: int = 8
+    #
+    # STEP 4 OOM FIX: lowered from 8 to 2. 8 concurrent dispatch
+    # threads (each potentially blocked for up to its own 15s SMTP/
+    # Twilio socket timeout - see email.py/sms.py) is unnecessarily
+    # aggressive for this 512MB, WEB_CONCURRENCY=1 Render instance -
+    # up to 8 threads' worth of stack + in-flight send state live at
+    # once for what is, in practice, an occasional alert burst, not a
+    # bulk-mail workload. 2 keeps notification dispatch fully
+    # functional (still its own pool, still off the shared AnyIO
+    # limiter, still queues anything beyond capacity instead of
+    # dropping it) while capping concurrent RAM/thread pressure to a
+    # small, fixed amount. Still overridable via the
+    # NOTIFICATION_DISPATCH_WORKERS env var if a future deploy target
+    # has more headroom.
+    NOTIFICATION_DISPATCH_WORKERS: int = 2
 
     # Phase 10: per-recipient send retry for TRANSIENT provider errors
     # only (a dropped SMTP connection, a connection-refused/timeout to
@@ -256,11 +288,15 @@ class Settings(BaseSettings):
     # connections are rejected cleanly (WS close code 1013, "try again
     # later") before the handshake is even accepted, so a rejected
     # client never occupies a connection slot and every already-
-    # connected client is unaffected. 200 is generously above normal
-    # per-worker dashboard usage (WEB_CONCURRENCY defaults to 1) while
-    # still bounding worst-case memory on a free instance; raise it via
-    # env var once you're on a bigger one.
-    WS_MAX_CONNECTIONS: int = 200
+    # connected client is unaffected.
+    #
+    # STEP 5 OOM FIX: lowered from 200 to 50. 200 concurrent open
+    # sockets (plus their per-broadcast fan-out cost) is more headroom
+    # than this 512MB, WEB_CONCURRENCY=1 instance actually needs for
+    # realistic dashboard usage - 50 is still comfortably above normal
+    # per-worker usage while meaningfully bounding worst-case peak
+    # memory; raise it via env var once you're on a bigger instance.
+    WS_MAX_CONNECTIONS: int = 50
 
     # A single authenticated user_id (several open tabs/devices, or a
     # stuck client stuck in a reconnect loop) can hold at most this
@@ -268,8 +304,14 @@ class Settings(BaseSettings):
     # user are rejected the same way, so one user's client can't eat an
     # outsized share of WS_MAX_CONNECTIONS on its own. Anonymous
     # (no-token) connections aren't tracked per-user and are unaffected
-    # by this limit. Comfortably above realistic multi-tab usage.
-    WS_MAX_CONNECTIONS_PER_USER: int = 20
+    # by this limit.
+    #
+    # STEP 5 OOM FIX: lowered from 20 to 5, matching the WS_MAX_
+    # CONNECTIONS reduction above - still comfortably above realistic
+    # multi-tab usage for one user while keeping a single stuck/looping
+    # client from eating a large share of the new, smaller 50-connection
+    # ceiling.
+    WS_MAX_CONNECTIONS_PER_USER: int = 5
 
     model_config = SettingsConfigDict(
         env_file=".env",

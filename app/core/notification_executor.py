@@ -34,10 +34,11 @@ Give notification dispatch its own small, bounded `ThreadPoolExecutor`
 - completely separate from AnyIO's worker limiter. A burst of slow
 notification sends can now only ever compete with *other* notification
 dispatches for a thread, never with the pool every other endpoint
-depends on. `NOTIFICATION_DISPATCH_WORKERS` (default 8) caps how many
-dispatch batches can run at once; further submissions queue on this
-executor's own internal queue instead of stealing capacity from
-anything else.
+depends on. `NOTIFICATION_DISPATCH_WORKERS` (default 2 - see
+app/core/config.py; lowered from an earlier default of 8 as a STEP 4
+OOM fix for this 512MB instance) caps how many dispatch batches can
+run at once; further submissions queue on this executor's own
+internal queue instead of stealing capacity from anything else.
 
 This module intentionally has zero dependency on FastAPI/Starlette/
 AnyIO - it's a plain `concurrent.futures.ThreadPoolExecutor`, submitted

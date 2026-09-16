@@ -17,18 +17,7 @@ from app.utils.geo import cities_for_state, state_for_city
 from app.websocket.events import CROWD_UPDATE
 from app.websocket.manager import manager
 
-# BUGFIX (remaining expensive history queries): get_inflow_outflow /
-# get_inflow_outflow_bulk (and get_station_monitor, which calls the
-# bulk version for every active station) take a caller-supplied
-# `hours` window with no upper bound. `since = now - timedelta(hours=
-# hours)` with an oversized/absurd value (e.g. ?hours=87600000 - "10
-# thousand years") degrades straight into "SELECT every row ever
-# written", i.e. an unbounded `.all()` over the crowd_logs table in
-# disguise - the same class of problem Phase 9 already fixed for
-# alerts/notifications/predictions/schedules/users, just reached via a
-# time filter instead of a raw limit/offset. The frontend never asks
-# for more than 72h (see ReportsPanel.tsx's WINDOW_OPTIONS), so this
-# cap is far above any real usage and purely a server-side backstop.
+
 MAX_HISTORY_WINDOW_HOURS = 720  # 30 days
 
 def _clamp_hours(hours: int) -> int:
@@ -130,11 +119,6 @@ def apply_live_state_delta(db: Session, station: Station, delta: int) -> tuple[i
     rows) - only same-station contention serializes, which is exactly
     the case that needs it.
     """
-    # Bootstrap the row if this is the very first time this station
-    # has ever had a live-state row (ON CONFLICT DO NOTHING is itself
-    # safe to race - at most one of several concurrent first-timers
-    # actually inserts, the rest no-op and fall through to the SELECT
-    # ... FOR UPDATE below).
     bootstrap = pg_insert(StationCrowdState).values(
         station_id=station.id,
         current_count=0,
@@ -218,18 +202,7 @@ def _get_station_wise_snapshot_from_db(db: Session, state: str | None = None) ->
     running a ROW_NUMBER() OVER (...) window query over the much
     larger, ever-growing crowd_logs table. Same output shape as
     before - this is a data-source swap, not a behaviour change."""
-    # MAP FIX (crowd heatmap: unreadable pile-up of station dots/labels):
-    # the heatmap/dashboard maps draw a polyline connecting every
-    # station on the same metro line (see mapLines.ts on the frontend),
-    # but this query never told the frontend which line a station
-    # belongs to - so that feature silently did nothing and the map had
-    # no structure to organise ~280+ stations by. Left-joining
-    # line_stations -> metro_lines here (a station has at most one line
-    # row in this schema; interchanges are modelled as one `stations`
-    # row per line, see the dedupe note in get_heatmap below) gives the
-    # frontend line_name/line_color/station_order so it can draw real
-    # line paths and no longer has to dump every station into one
-    # undifferentiated blob.
+
     query = (
         db.query(
             Station,
@@ -303,15 +276,6 @@ def get_heatmap(db: Session, state: str | None = None, limit: int | None = None)
         and (entry.get("capacity") or 0) > 0
     ]
 
-    # BUGFIX (dashboard: same station plotted twice on the heatmap):
-    # interchange stations are stored as one `stations` row per metro
-    # line they sit on (same station_name, different station_id, ~same
-    # lat/lng) - that's correct for routing, but it means the raw
-    # snapshot has two rows for e.g. one physical "Kashmere Gate", so
-    # the heatmap drew two overlapping dots with the same label. Dedupe
-    # by station_name here, right before the map/UI ever sees the data,
-    # keeping the copy with the higher occupancy_ratio so a genuinely
-    # crowded interchange never gets hidden behind its quieter twin.
     deduped: dict[str, dict] = {}
     for entry in heatmap:
         key = entry["station_name"].strip().lower()
@@ -482,8 +446,9 @@ def get_inflow_outflow(db: Session, station_id: int, hours: int = 24) -> dict:
         "samples": values["samples"],
     }
 
-def get_station_analytics(db: Session, station_id: int) -> dict:
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+def get_station_analytics(db: Session, station_id: int, hours: int = 24) -> dict:
+    hours = _clamp_hours(hours)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     stats = (
         db.query(
             func.avg(CrowdLog.current_count),
@@ -498,6 +463,7 @@ def get_station_analytics(db: Session, station_id: int) -> dict:
 
     return {
         "station_id": station_id,
+        "window_hours": hours,
         "average_count_24h": round(avg_count, 1) if avg_count else 0,
         "peak_count_24h": max_count or 0,
         "min_count_24h": min_count or 0,

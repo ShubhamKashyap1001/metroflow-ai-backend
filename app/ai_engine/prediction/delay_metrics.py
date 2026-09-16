@@ -1,14 +1,25 @@
-"""New (real-data) module - live evaluation metrics for the production
-delay-prediction model.
+"""Dashboard metrics for the production delay-prediction model.
 
 Powers the delay section of the "AI Prediction" dashboard page, same
-role as crowd_metrics.py plays for the crowd/demand model. Everything
-below is computed from the REAL datasets/stations.csv,
-datasets/passenger_flow.csv, datasets/train_operations.csv and
-datasets/trains.csv, and the REAL trained delay_model.pkl - nothing is
-hardcoded.
+role as crowd_metrics.py plays for the crowd/demand model.
 
-Design notes:
+IMPORTANT - what actually runs in the deployed API process:
+`compute_delay_metrics()` (the function prediction_service.py calls)
+only reads the small precomputed `delay_model_metrics.json` file below
+- it never touches delay_model.pkl and never reads the source CSVs at
+request time. See crowd_metrics.py's module docstring for the full
+reasoning (same OOM concern: showing a Random Forest vs XGBoost
+comparison needs both fitted candidates in memory at once, which is
+only ever done OFFLINE now, by
+colab_training/precompute_dashboard_metrics.py). Re-run that script
+after retraining and redeploy the refreshed
+delay_model_metrics.json alongside the new delay_model.pkl.
+
+`_live_compute_delay_metrics()` below still holds the real evaluation
+logic and is kept as the single source of truth for it, but is only
+ever invoked by the offline precompute script.
+
+Design notes (for _live_compute_delay_metrics):
 - Rebuilds the exact same 8-feature (station_id, hour, day_of_week,
   is_weekend, is_peak_hour, passenger_count, capacity_passengers,
   train_age_days) -> delay_minutes training table that
@@ -25,6 +36,7 @@ Design notes:
 - Cached for the life of the process - the dataset/model are static
   files, so recomputing on every poll would be wasted CPU.
 """
+import json
 import os
 from functools import lru_cache
 
@@ -37,6 +49,10 @@ from sklearn.model_selection import train_test_split
 from app.utils.timezone import business_today
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
+# Precomputed offline (see colab_training/precompute_dashboard_metrics.py)
+# from a build-time bundle that has BOTH fitted candidates. This is the
+# only thing the running API reads - see module docstring above.
+METRICS_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model_metrics.json")
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
@@ -289,6 +305,29 @@ def _evaluate_one(model, model_features, X_test, y_test_arr, trained_rows) -> di
 
 @lru_cache(maxsize=1)
 def compute_delay_metrics() -> dict:
+    """What the running API actually calls (see
+    prediction_service.get_delay_model_metrics). Reads the small
+    precomputed JSON file only - never unpickles delay_model.pkl, never
+    reads the source CSVs, never holds more than the single production
+    model in this process's memory. See module docstring for why."""
+    if not os.path.exists(METRICS_JSON_PATH):
+        print(f"[{__name__}] no precomputed metrics at {METRICS_JSON_PATH} - "
+              f"run colab_training/precompute_dashboard_metrics.py")
+        return _unavailable()
+    try:
+        with open(METRICS_JSON_PATH) as f:
+            return json.load(f)
+    except Exception as exc:
+        print(f"[{__name__}] failed to read {METRICS_JSON_PATH}: {exc!r}")
+        return _unavailable()
+
+
+def _live_compute_delay_metrics() -> dict:
+    """Real evaluation logic - loads delay_model.pkl and the source
+    CSVs, evaluates every candidate in bundle["models"] against a fresh
+    held-out split. NOT called by the running API (see module
+    docstring) - only by colab_training/precompute_dashboard_metrics.py,
+    offline, against a build-time bundle that has both candidates."""
     bundle = _load_model()
     if bundle is None:
         return _unavailable()

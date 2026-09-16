@@ -1,10 +1,26 @@
 import argparse
 import gzip
 import os
+import time
 from datetime import date, datetime
+
+# This script reuses app.database.session's engine, which - by design -
+# sets a 30s Postgres statement_timeout on every connection
+# (DB_STATEMENT_TIMEOUT_MS in app/core/config.py) so a stuck live API
+# request can never hang forever. That's the right call for the API,
+# but it's exactly wrong for THIS script: a --reset TRUNCATE across 12
+# FK-linked tables, or a several-hundred-thousand-row bulk insert, can
+# legitimately take minutes - especially when run from a machine
+# outside Render's network. Overriding it here (env var must be set
+# BEFORE app.database.config/database are imported below, since that's
+# when the engine/connect_args are actually built) gives this one
+# script a generous timeout without touching the API's own safety net.
+os.environ.setdefault("DB_STATEMENT_TIMEOUT_MS", str(10 * 60 * 1000))  # 10 min
 
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError
 
 from app.database.init_db import create_tables
 from app.database.session import SessionLocal
@@ -23,6 +39,39 @@ from app.models.train import Train
 from app.models.train_location import TrainLocation
 from app.models.train_schedule import TrainSchedule
 from app.models.train_schedule_history import TrainScheduleHistory
+
+def _bulk_insert_with_retry(db, model, rows, attempts: int = 8, backoff_seconds: float = 5.0) -> None:
+    """bulk_insert_mappings + commit, retried on a transient dropped/
+    reset connection or DNS blip (psycopg2.OperationalError - "server
+    closed the connection unexpectedly", "could not translate host
+    name", etc.) instead of losing the whole run. Doesn't retry other
+    errors (bad data, constraint violations, etc.) - those should
+    still fail loudly and immediately.
+
+    Backoff DOUBLES each attempt (5s, 10s, 20s, 40s, 60s, 60s, 60s) -
+    a DNS/Wi-Fi blip on a home connection can take longer than a flat
+    3s to clear, so a fixed short retry just burns through its
+    attempts too fast. Also disposes the engine's connection pool
+    before retrying, so the next attempt does a completely fresh
+    TCP + DNS connect instead of possibly reusing a connection object
+    left in a bad state by the failure that just happened.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            db.bulk_insert_mappings(model, rows)
+            db.commit()
+            return
+        except OperationalError as exc:
+            db.rollback()
+            db.get_bind().dispose()
+            if attempt == attempts:
+                raise
+            wait = min(backoff_seconds * (2 ** (attempt - 1)), 60)
+            print(f"\n  [retry] chunk insert into {model.__tablename__} failed "
+                  f"(attempt {attempt}/{attempts}: {type(exc).__name__}), "
+                  f"retrying in {wait:.0f}s...")
+            time.sleep(wait)
+
 
 DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "source")
 
@@ -434,8 +483,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                     "delay_reason": orow["delay_reason"] if orow["delay_reason"] != "None" else None,
                 })
                 if len(history_dicts) >= CHUNK_SIZE:
-                    db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
-                    db.commit()
+                    _bulk_insert_with_retry(db, TrainScheduleHistory, history_dicts)
                     history_inserted += len(history_dicts)
                     print(f"  train_schedule_history: {history_inserted}/{total_ops_rows - dropped} inserted...", end="\r")
                     history_dicts = []
@@ -461,8 +509,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                         "status": ScheduleStatus.DELAYED if delay_minutes > 0 else ScheduleStatus.ON_TIME,
                     }
         if history_dicts:
-            db.bulk_insert_mappings(TrainScheduleHistory, history_dicts)
-            db.commit()
+            _bulk_insert_with_retry(db, TrainScheduleHistory, history_dicts)
             history_inserted += len(history_dicts)
         if dropped:
             print(f"\ntrain_operations: dropped {dropped} row(s) with an unknown station_id/train_id")
@@ -470,8 +517,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
 
         timetable_dicts = list(timetable_by_slot.values())
         for i in range(0, len(timetable_dicts), CHUNK_SIZE):
-            db.bulk_insert_mappings(TrainSchedule, timetable_dicts[i:i + CHUNK_SIZE])
-            db.commit()
+            _bulk_insert_with_retry(db, TrainSchedule, timetable_dicts[i:i + CHUNK_SIZE])
         print(f"  train_schedules: {len(timetable_dicts)} canonical slots inserted "
               f"(collapsed from {history_inserted} historical rows).")
 
@@ -498,7 +544,35 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.add_all(crowd_rows)
         db.flush()
         if live_state_rows:
-            db.bulk_insert_mappings(StationCrowdState, live_state_rows)
+            # station_crowd_state is a "current fact" table with
+            # station_id as its PRIMARY KEY (see app/models/
+            # station_crowd_state.py) - by design it holds exactly
+            # ONE row per station, upserted in place, never appended
+            # to. A plain bulk_insert_mappings() here hard-fails with
+            # a UniqueViolation the moment this row already exists -
+            # e.g. on any re-run of this script against a database
+            # that wasn't (or couldn't be) fully wiped by --reset, or
+            # if any upstream retry ever produces the same station_id
+            # twice in one batch. Use an upsert instead so seeding
+            # this table is always idempotent, matching how every
+            # other writer of this table (simulator/checkin/checkout)
+            # already treats it.
+            #
+            # Dedupe in Python first too, so two rows for the same
+            # station_id within a single batch can never collide with
+            # EACH OTHER inside the same INSERT statement (last one
+            # wins) - ON CONFLICT alone only protects against rows
+            # already committed in the table.
+            deduped_rows = list({row["station_id"]: row for row in live_state_rows}.values())
+            stmt = pg_insert(StationCrowdState).values(deduped_rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["station_id"],
+                set_={
+                    "current_count": stmt.excluded.current_count,
+                    "crowd_level": stmt.excluded.crowd_level,
+                },
+            )
+            db.execute(stmt)
 
         db.commit()
         print(

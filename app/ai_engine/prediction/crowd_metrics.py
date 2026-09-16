@@ -1,5 +1,4 @@
-"""New (real-data) module - live evaluation metrics for the production
-crowd/demand prediction model.
+"""Dashboard metrics for the production crowd/demand prediction model.
 
 Powers the crowd/demand section of the "AI Prediction" dashboard page.
 The crowd model and the demand model are the SAME trained artifact in
@@ -7,11 +6,38 @@ this codebase (see prediction_service.forecast_demand, which just calls
 predict_crowd() repeatedly for future hours) - either a
 RandomForestRegressor or an XGBRegressor (whichever had the lower
 held-out MAE at training time, see colab_training/train_crowd_model.py)
-predicting passenger_count for a station/hour slot. Everything below is
-computed from the REAL datasets/passenger_flow.csv + datasets/stations.csv
-and the REAL trained crowd_model.pkl - nothing is hardcoded.
+predicting passenger_count for a station/hour slot.
 
-Design notes:
+IMPORTANT - what actually runs in the deployed API process:
+`compute_crowd_metrics()` (the function prediction_service.py calls)
+only reads the small precomputed `crowd_model_metrics.json` file below
+- it never touches crowd_model.pkl and never imports the real
+passenger_flow/stations CSVs at request time. This is deliberate: this
+file used to unpickle the model bundle AND stream the full dataset on
+every cold cache miss, and - critically - to show a Random Forest vs
+XGBoost comparison it had to hold BOTH fitted candidates in memory
+simultaneously (on top of whatever the prediction-serving path already
+has loaded via app/ai_engine/model_bundle.py). On a Render Free 512MB
+instance that is a real OOM risk, even if only transient/once-per-
+process. Precomputing removes that risk entirely: both candidates are
+only ever loaded together OFFLINE, by
+colab_training/precompute_dashboard_metrics.py, run as part of the
+training/build step - never inside the running web service. The
+deployed crowd_model.pkl itself only ever contains the single winning
+model (see app/ai_engine/model_bundle.py), so even a bug that somehow
+called the old code path could not load two models into this process.
+
+The `_live_compute_crowd_metrics()` function below still contains the
+real evaluation logic (rebuilds the exact real-data test split, runs
+both candidates against it, buckets predictions into CrowdLevel
+classes, computes accuracy/Macro-F1/confusion matrix/critical recall).
+It is kept here as the single source of truth for that logic, but it
+is only ever invoked by the offline precompute script - re-run it
+(python colab_training/precompute_dashboard_metrics.py) whenever the
+models are retrained, then redeploy the refreshed
+crowd_model_metrics.json alongside the new crowd_model.pkl.
+
+Design notes (for _live_compute_crowd_metrics):
 - Rebuilds the exact same (station_id, hour, day_of_week, is_weekend,
   is_peak_hour) -> passenger_count training table that
   colab_training/train_crowd_model.py builds via _real_dataset_builder.py
@@ -30,9 +56,8 @@ Design notes:
   (capacity = passenger_count / crowding_index, median across rows) -
   the SAME implied capacity is used to bucket both actual and predicted
   counts, so the comparison stays apples-to-apples.
-- Cached for the life of the process - the dataset/model are static
-  files, so recomputing on every 30s poll would be wasted CPU.
 """
+import json
 import os
 from functools import lru_cache
 
@@ -49,6 +74,10 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "crowd_model.pkl")
+# Precomputed offline (see colab_training/precompute_dashboard_metrics.py)
+# from a build-time bundle that has BOTH fitted candidates. This is the
+# only thing the running API reads - see module docstring above.
+METRICS_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "crowd_model_metrics.json")
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
 PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
@@ -270,6 +299,29 @@ def _evaluate_one(model, model_features, X_test, y_test_arr, implied_capacity, t
 
 @lru_cache(maxsize=1)
 def compute_crowd_metrics() -> dict:
+    """What the running API actually calls (see
+    prediction_service.get_crowd_model_metrics). Reads the small
+    precomputed JSON file only - never unpickles crowd_model.pkl, never
+    reads the source CSVs, never holds more than the single production
+    model in this process's memory. See module docstring for why."""
+    if not os.path.exists(METRICS_JSON_PATH):
+        print(f"[{__name__}] no precomputed metrics at {METRICS_JSON_PATH} - "
+              f"run colab_training/precompute_dashboard_metrics.py")
+        return _unavailable()
+    try:
+        with open(METRICS_JSON_PATH) as f:
+            return json.load(f)
+    except Exception as exc:
+        print(f"[{__name__}] failed to read {METRICS_JSON_PATH}: {exc!r}")
+        return _unavailable()
+
+
+def _live_compute_crowd_metrics() -> dict:
+    """Real evaluation logic - loads crowd_model.pkl and the source
+    CSVs, evaluates every candidate in bundle["models"] against a fresh
+    held-out split. NOT called by the running API (see module
+    docstring) - only by colab_training/precompute_dashboard_metrics.py,
+    offline, against a build-time bundle that has both candidates."""
     bundle = _load_model()
     if bundle is None:
         return _unavailable()

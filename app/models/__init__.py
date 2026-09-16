@@ -4,6 +4,7 @@ from app.models.route import Route
 from app.models.station import Station
 from app.models.line_station import LineStation
 from app.models.journey import Journey
+from app.models.saved_route import SavedRoute
 from app.models.train import Train
 from app.models.train_schedule import TrainSchedule
 from app.models.train_schedule_history import TrainScheduleHistory

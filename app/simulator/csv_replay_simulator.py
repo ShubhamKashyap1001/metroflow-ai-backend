@@ -726,7 +726,23 @@ async def run_forever(session_factory, interval_seconds: int = 60) -> None:
         db = session_factory()
         try:
             await replay_tick(db)
-        except Exception as exc:                
+        except asyncio.CancelledError:
+            # asyncio.to_thread() only cancels the AWAIT - the worker
+            # thread actually running _tick_sync(db) keeps executing in
+            # the background and may still be mid-operation on `db`
+            # (commit/_prepare_impl) at this exact moment. Closing the
+            # session here, from this (event-loop) thread, would race
+            # that still-running worker thread and raise SQLAlchemy's
+            # IllegalStateChangeError ("close() can't be called here -
+            # already in progress"), crashing the leader-election loop
+            # instead of shutting down cleanly. On cancellation (leader
+            # stepping down, process shutdown) we deliberately do NOT
+            # touch `db` again here - the worker thread finishes and
+            # abandons it on its own. That's a one-off, rare session
+            # leak on an already-shutting-down path, not a recurring
+            # one, and far safer than crashing the loop.
+            raise
+        except Exception as exc:
             print(f"[csv_replay] tick failed, will retry next interval: {exc}")
             # Phase 6: explicit rollback before close. _tick_sync can
             # raise after some rows were already staged (db.add/execute)
@@ -737,6 +753,7 @@ async def run_forever(session_factory, interval_seconds: int = 60) -> None:
             # never handed back to the pool by accident, on this path
             # or any future refactor of it.
             db.rollback()
-        finally:
+            db.close()
+        else:
             db.close()
         await asyncio.sleep(interval_seconds)

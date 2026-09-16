@@ -1,0 +1,95 @@
+{
+  "available": true,
+  "model_name": "XGBoost",
+  "mae": 0.15,
+  "mape_pct": 1.37,
+  "r2": 0.8367,
+  "trained_rows": 37296,
+  "test_rows": 9324,
+  "feature_importance": [
+    {
+      "feature": "is_peak_hour",
+      "importance": 0.7735751271247864
+    },
+    {
+      "feature": "station_id",
+      "importance": 0.16721098124980927
+    },
+    {
+      "feature": "day_of_week",
+      "importance": 0.03581368550658226
+    },
+    {
+      "feature": "hour",
+      "importance": 0.023400243371725082
+    },
+    {
+      "feature": "is_weekend",
+      "importance": 0.0
+    }
+  ],
+  "models": {
+    "xgboost_tuned": {
+      "available": true,
+      "mae": 0.15,
+      "mape_pct": 1.37,
+      "r2": 0.8367,
+      "trained_rows": 37296,
+      "test_rows": 9324,
+      "feature_importance": [
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.7735751271247864
+        },
+        {
+          "feature": "station_id",
+          "importance": 0.16721098124980927
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.03581368550658226
+        },
+        {
+          "feature": "hour",
+          "importance": 0.023400243371725082
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.0
+        }
+      ],
+      "model_name": "XGBoost"
+    },
+    "random_forest": {
+      "available": true,
+      "mae": 0.23,
+      "mape_pct": 2.03,
+      "r2": 0.8109,
+      "trained_rows": 37296,
+      "test_rows": 9324,
+      "feature_importance": [
+        {
+          "feature": "station_id",
+          "importance": 0.6813610526384264
+        },
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.16169908066276448
+        },
+        {
+          "feature": "hour",
+          "importance": 0.06446230479051349
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.05010491191702053
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.04237264999127516
+        }
+      ],
+      "model_name": "Random Forest"
+    }
+  }
+}

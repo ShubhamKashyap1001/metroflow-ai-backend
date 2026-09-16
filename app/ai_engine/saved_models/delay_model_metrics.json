@@ -1,0 +1,143 @@
+{
+  "available": true,
+  "model_name": "XGBoost",
+  "mae": 0.46,
+  "mape_pct": 289.75,
+  "r2": 0.3924,
+  "trained_rows": 301027,
+  "test_rows": 75257,
+  "feature_importance": [
+    {
+      "feature": "weather_code",
+      "importance": 0.5716150403022766
+    },
+    {
+      "feature": "is_peak_hour",
+      "importance": 0.2975226044654846
+    },
+    {
+      "feature": "passenger_count",
+      "importance": 0.03468726947903633
+    },
+    {
+      "feature": "station_id",
+      "importance": 0.0329633392393589
+    },
+    {
+      "feature": "hour",
+      "importance": 0.018592722713947296
+    },
+    {
+      "feature": "day_of_week",
+      "importance": 0.013035155832767487
+    },
+    {
+      "feature": "capacity_passengers",
+      "importance": 0.012787352316081524
+    },
+    {
+      "feature": "train_age_days",
+      "importance": 0.010879780165851116
+    },
+    {
+      "feature": "is_weekend",
+      "importance": 0.007916689850389957
+    }
+  ],
+  "models": {
+    "random_forest_tuned": {
+      "available": true,
+      "mae": 0.48,
+      "mape_pct": 201.37,
+      "r2": 0.1725,
+      "trained_rows": 301027,
+      "test_rows": 75257,
+      "feature_importance": [
+        {
+          "feature": "weather_code",
+          "importance": 0.6547477056039346
+        },
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.10936071736023613
+        },
+        {
+          "feature": "passenger_count",
+          "importance": 0.10156581612372977
+        },
+        {
+          "feature": "station_id",
+          "importance": 0.08230976370767774
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.018336394133081104
+        },
+        {
+          "feature": "hour",
+          "importance": 0.017887110710155564
+        },
+        {
+          "feature": "train_age_days",
+          "importance": 0.0103747198295683
+        },
+        {
+          "feature": "capacity_passengers",
+          "importance": 0.003333828562166185
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.0020839439694506465
+        }
+      ],
+      "model_name": "Random Forest"
+    },
+    "xgboost": {
+      "available": true,
+      "mae": 0.46,
+      "mape_pct": 289.75,
+      "r2": 0.3924,
+      "trained_rows": 301027,
+      "test_rows": 75257,
+      "feature_importance": [
+        {
+          "feature": "weather_code",
+          "importance": 0.5716150403022766
+        },
+        {
+          "feature": "is_peak_hour",
+          "importance": 0.2975226044654846
+        },
+        {
+          "feature": "passenger_count",
+          "importance": 0.03468726947903633
+        },
+        {
+          "feature": "station_id",
+          "importance": 0.0329633392393589
+        },
+        {
+          "feature": "hour",
+          "importance": 0.018592722713947296
+        },
+        {
+          "feature": "day_of_week",
+          "importance": 0.013035155832767487
+        },
+        {
+          "feature": "capacity_passengers",
+          "importance": 0.012787352316081524
+        },
+        {
+          "feature": "train_age_days",
+          "importance": 0.010879780165851116
+        },
+        {
+          "feature": "is_weekend",
+          "importance": 0.007916689850389957
+        }
+      ],
+      "model_name": "XGBoost"
+    }
+  }
+}

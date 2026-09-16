@@ -1,8 +1,4 @@
-"""Milestone 1 - Crowd Monitoring Module.
 
-Fixed: previously imported a non-existent `database.supabase` client and
-had no request validation. Now backed by SQLAlchemy + crowd_service.
-"""
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -78,6 +74,6 @@ def inflow_outflow(station_id: int, hours: int = 24, db: Session = Depends(get_d
     return crowd_service.get_inflow_outflow(db, station_id, hours)
 
 @router.get("/{station_id}/analytics")
-def station_analytics(station_id: int, db: Session = Depends(get_db)):
+def station_analytics(station_id: int, hours: int = 24, db: Session = Depends(get_db)):
     """Station-wise analytics."""
-    return crowd_service.get_station_analytics(db, station_id)
+    return crowd_service.get_station_analytics(db, station_id, hours)
