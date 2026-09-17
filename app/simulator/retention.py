@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.crowd_log import CrowdLog
 from app.models.crowd_log_hourly import CrowdLogHourly
+from app.services import peak_hour_service
 from app.utils.db_batch import batched_delete
 
 logger = logging.getLogger(__name__)
@@ -139,15 +140,18 @@ def _hard_delete_stale_hourly(db: Session) -> int:
 
 def run_retention_once(db: Session) -> dict:
     """One full retention pass: rollup+delete, then both hard-delete
-    safety nets. Synchronous - callers running on the event loop
-    should wrap this in asyncio.to_thread (see run_forever below)."""
+    safety nets, then the peak-hour cache refresh. Synchronous -
+    callers running on the event loop should wrap this in
+    asyncio.to_thread (see run_forever below)."""
     rollup_stats = _rollup_and_delete(db)
     raw_deleted = _hard_delete_stale_raw(db)
     hourly_deleted = _hard_delete_stale_hourly(db)
+    peak_hour_stats = peak_hour_service.compute_and_cache_peak_hours(db)
     stats = {
         **rollup_stats,
         "raw_safety_net_deleted": raw_deleted,
         "hourly_rollups_deleted": hourly_deleted,
+        "peak_hours": peak_hour_stats,
     }
     if stats["rolled_up_buckets"] or stats["raw_rows_deleted"] or raw_deleted or hourly_deleted:
         logger.info("[crowd_retention] %s", stats)

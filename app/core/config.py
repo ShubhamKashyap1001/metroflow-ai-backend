@@ -171,6 +171,18 @@ class Settings(BaseSettings):
     ENABLE_CROWD_RETENTION_JOB: bool = True
     CROWD_RETENTION_INTERVAL_SECONDS: int = 3600
 
+    # Peak-hour badge: rides along with the hourly retention job
+    # instead of its own background loop - no new leader-election
+    # wiring needed. Reads only crowd_logs_hourly (already bounded),
+    # scoped to a recent lookback window, and caches the result in
+    # Redis. Never computed on a request path.
+    ENABLE_PEAK_HOUR_CACHE: bool = True
+    PEAK_HOUR_LOOKBACK_DAYS: int = 30
+    PEAK_HOUR_TOP_N: int = 10
+    # > CROWD_RETENTION_INTERVAL_SECONDS so the cache never goes empty
+    # between two consecutive retention passes.
+    PEAK_HOUR_CACHE_TTL_SECONDS: int = 5400
+
     # Retention/rollup jobs (crowd_logs safety-net + rollup deletes,
     # crowd_logs_hourly deletes, notification bin deletes) never issue
     # one unbounded DELETE for the whole backlog - they delete this

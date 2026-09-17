@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -7,6 +6,7 @@ from app.database.session import get_db
 from app.enums.crowd_level import CrowdLevel
 from app.schemas.crowd_log import CrowdLogCreate, CrowdLogResponse
 from app.services import crowd_service
+from app.services import peak_hour_service
 
 router = APIRouter(
     prefix="/crowd",
@@ -59,6 +59,16 @@ def station_monitor(
     currently selected city so the widget only shows that city's
     stations."""
     return crowd_service.get_station_monitor(db, state, hours)
+
+
+@router.get("/peak-hours")
+def peak_hours():
+    """Top busiest stations and their historically busiest hour
+    (UTC), read straight from Redis - refreshed once per hour by the
+    retention job, never computed on this request path. Returns
+    {"stations": [], "generated_at": None} until the first retention
+    pass has run after deploy."""
+    return peak_hour_service.get_cached_peak_hours()
 
 
 @router.get("/{station_id}")
