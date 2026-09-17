@@ -9,7 +9,7 @@ services:
     preDeployCommand: alembic upgrade head
     envVars:
       - key: DATABASE_URL
-        sync: false          # your Postgres connection string
+        sync: false         
       - key: REDIS_URL
         sync: false          # optional - app degrades gracefully if unset
       - key: SUPABASE_URL

@@ -45,9 +45,7 @@ from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.core.security import get_user_from_token_optional
 from app.database.session import SessionLocal
-from app.enums.notification_source import NotificationSource
 from app.services import notification_dispatch_queue
-from app.services import notification_service
 from app.simulator.scheduler import (
     start_notification_bin_retention_job,
     start_retention_job,
@@ -116,20 +114,16 @@ async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
                   "or checking for a slow query/unreachable DB.", request.url.path)
     metrics.record_db_failure("pool_exhausted")
 
-    try:
-        notif_db = SessionLocal()
-        try:
-            notification_service.create_notification(
-                notif_db,
-                source=NotificationSource.SYSTEM_FAILURE,
-                title="Database connection pool exhausted",
-                message=f"No free DB connection within the pool timeout on {request.url.path}. "
-                        "Consider raising DB_POOL_SIZE/DB_MAX_OVERFLOW or checking for a slow query.",
-            )
-        finally:
-            notif_db.close()
-    except Exception:
-        pass
+    # Deliberately NOT writing a "pool exhausted" notification to the DB
+    # here. Opening `SessionLocal()` to record this would try to check
+    # out yet another connection from the exact pool that has none free
+    # - that checkout attempt blocks for the full DB_POOL_TIMEOUT again
+    # (turning what should be an immediate 503 into one that hangs for
+    # ~DB_POOL_TIMEOUT seconds first), and under a burst of these errors
+    # every handler instance competing for the same scarce connections
+    # makes the exhaustion worse instead of just reporting it. The
+    # logger.error + metrics counter above are DB-free and already
+    # sufficient for alerting on this condition.
 
     return JSONResponse(
         status_code=503,

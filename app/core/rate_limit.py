@@ -83,6 +83,7 @@ import time
 
 import redis
 from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_ipaddr
 
 from app.core.config import settings
@@ -208,3 +209,72 @@ def _rate_limit_exceeded_handler_with_retry_after(request, exc):
 
 
 limiter = _build_limiter()
+
+
+# --- Fail open on backend (Redis) errors during a live rate-limit check ---
+#
+# Confirmed root cause (2026-09): the Upstash free tier backing REDIS_URL
+# has a hard 500K-commands/month quota. Once hit, Upstash starts
+# rejecting every command with a Redis-protocol `ResponseError` ("max
+# requests limit exceeded") instead of the usual OOM-style error - same
+# failure shape, different reason, and slowapi has no graceful handling
+# for either.
+#
+# `_build_limiter()`/`_redis_reachable()` above only guard *startup*:
+# they prove Redis is reachable once, when the process boots. They do
+# nothing if Redis starts rejecting commands *after* that - whether from
+# hitting a memory cap or, as confirmed here, a monthly command quota -
+# which makes redis-py raise `redis.exceptions.ResponseError` on every
+# command, including the INCR/EXPIRE-style calls slowapi's Limiter makes
+# on *every* request to check `default_limits`.
+#
+# slowapi's SlowAPIMiddleware (see `_check_limits` in
+# slowapi/middleware.py) catches ANY exception raised during that check
+# and looks up a handler for it in `app.exception_handlers`. Only
+# `RateLimitExceeded` has one registered (see app/main.py); every other
+# exception type - including this Redis error - falls back to slowapi's
+# own built-in `_rate_limit_exceeded_handler`, which unconditionally
+# reads `exc.detail`. A `ResponseError` has no `.detail`, so that
+# fallback itself crashes with `AttributeError`, and the *original*
+# Redis problem turns into an unhandled 500 on every single route the
+# middleware checks - including /healthz, which has nothing to do with
+# Redis at all. This is exactly what the "connection pool exhausted" /
+# "DB unreachable" symptoms reported earlier turned out to trace back
+# to: Render's health check itself 500ing, triggering restarts.
+#
+# Wrapping the check here, at the source, means a backend hiccup is
+# treated as "allow the request" (fail open) - consistent with the
+# fail-open fallback `_build_limiter()` already uses when Redis is down
+# at startup - instead of taking the whole API down whenever the Redis
+# instance backing the limiter is unavailable or over quota. It does NOT
+# fix a Redis that's genuinely over its command quota; it only stops
+# that condition from also taking down every unrelated endpoint while
+# the quota resets or the plan is upgraded. Logged at WARNING (not
+# ERROR/exception) and rate-limited to once per 30s so a persistently
+# unavailable Redis doesn't itself flood the logs on every request.
+_last_backend_error_log_ts = 0.0
+
+
+def _patched_check_request_limit(*args, **kwargs):
+    global _last_backend_error_log_ts
+    try:
+        return _original_check_request_limit(*args, **kwargs)
+    except RateLimitExceeded:
+        # A real, intended rate-limit rejection - let it propagate so the
+        # normal 429 path (app/main.py's registered handler) still runs.
+        raise
+    except Exception:
+        now = time.time()
+        if now - _last_backend_error_log_ts > 30:
+            _last_backend_error_log_ts = now
+            logger.warning(
+                "[rate_limit] backend error during rate-limit check "
+                "(Redis unavailable or over quota/memory) - failing "
+                "OPEN for this request instead of blocking it.",
+                exc_info=True,
+            )
+        return None
+
+
+_original_check_request_limit = limiter._check_request_limit
+limiter._check_request_limit = _patched_check_request_limit
