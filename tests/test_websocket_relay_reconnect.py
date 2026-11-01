@@ -6,7 +6,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "verify_ws_relay_reconnect.py"
 
-
 def test_ws_relay_reconnect_verification_script_passes():
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],

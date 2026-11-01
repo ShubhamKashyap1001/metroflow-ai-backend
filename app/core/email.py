@@ -1,37 +1,3 @@
-"""SMTP email dispatch for the Alert & Notification Module.
-
-Uses a generic SMTP connection - works with Gmail (App Password),
-SendGrid SMTP relay, Mailgun, AWS SES SMTP, etc. No third-party SDK
-needed since smtplib/email are part of the Python standard library,
-so nothing new to add to requirements.txt.
-
-Phase 10 - transient-failure retry (see docs/notification-delivery.md)
------------------------------------------------------------------
-Before this phase, a single bad moment on the SMTP side - the
-provider dropping the connection, a connect timeout, a "4xx, try
-again later" response while it's temporarily overloaded - was
-indistinguishable from a permanent failure (a bad address, an auth
-error): one attempt, then `results[recipient] = "failed: ..."`
-forever. That's real notification loss for exactly the case that's
-supposed to be recoverable: the outage was temporary, but the
-notification wasn't retried, so it never arrived.
-
-`_is_transient_smtp_error()` below draws the line: connection-level
-problems and 4xx SMTP codes are treated as "worth retrying" (the
-provider is saying/implying "try again"), while a 5xx code, a
-rejected recipient/sender, or an auth failure are treated as
-permanent - retrying those would just burn the whole backoff window
-before failing anyway. Only the transient bucket gets retried, with a
-small bounded number of attempts and exponential backoff
-(NOTIFICATION_SEND_MAX_ATTEMPTS / NOTIFICATION_SEND_RETRY_BACKOFF_*
-in app/core/config.py) - each retry reconnects from scratch, since a
-dropped/broken connection can't just resume.
-
-This never sends the same recipient's email twice for one call: each
-recipient gets AT MOST ONE outcome ("sent" or "failed: ..."), retried
-in place before moving on - `send_alert_emails` still returns exactly
-one result per input recipient.
-"""
 import logging
 import smtplib
 import ssl
@@ -107,8 +73,7 @@ def _smtp_code_of(exc: Exception) -> int | None:
     code = getattr(exc, "smtp_code", None)
     if isinstance(code, int):
         return code
-    # SMTPRecipientsRefused carries one code per recipient instead of
-    # a single smtp_code - look at those instead.
+
     recipients = getattr(exc, "recipients", None)
     if isinstance(recipients, dict) and recipients:
         codes = [c for c, _ in recipients.values() if isinstance(c, int)]
@@ -117,33 +82,16 @@ def _smtp_code_of(exc: Exception) -> int | None:
     return None
 
 def _is_transient_smtp_error(exc: Exception) -> bool:
-    """True if `exc` represents a temporary condition worth retrying
-    (dropped connection, connection-refused/timed-out before the SMTP
-    session even started, or an explicit 4xx "try again later" SMTP
-    response) rather than a permanent one (bad address, rejected
-    sender, 5xx, auth failure).
-
-    NOTE: `smtplib.SMTPException` itself subclasses `OSError`, so a
-    plain `isinstance(exc, OSError)` check would also match every
-    protocol-level SMTP error (SMTPRecipientsRefused, etc.) and treat
-    permanent 5xx rejections as retryable. SMTP-protocol exceptions
-    are therefore classified by their status code FIRST; only a
-    non-SMTP exception falls through to the raw
-    connection/timeout/OSError check below.
-    """
     if isinstance(exc, smtplib.SMTPServerDisconnected):
-        # The connection dropped mid-session with no status code at
-        # all - always worth a fresh retry.
+
         return True
     if isinstance(exc, smtplib.SMTPException):
         code = _smtp_code_of(exc)
         if code is not None:
             return 400 <= code < 500
-        # No status code to go on (e.g. some SMTPAuthenticationError
-        # cases) - treat as permanent rather than retry blind.
+
         return False
-    # Not an SMTP-protocol exception at all: a genuine transport-level
-    # failure (connection refused, DNS failure, connect timeout).
+
     return isinstance(exc, (TimeoutError, ConnectionError, OSError))
 
 def send_alert_emails(
@@ -155,25 +103,6 @@ def send_alert_emails(
     available_until: str | None = None,
     resolved: bool = False,
 ) -> dict[str, str]:
-    """Send the alert email to every recipient over a single SMTP
-    connection, retrying each recipient (with a fresh reconnect) up to
-    `settings.NOTIFICATION_SEND_MAX_ATTEMPTS` times if the failure
-    looks TRANSIENT (see `_is_transient_smtp_error`) - a permanent
-    failure (bad address, rejected sender, auth error) fails on the
-    first attempt with no retry, since retrying it can't succeed.
-
-    Set `resolved=True` to send the "this has been resolved" version
-    of the email instead of the original alert email - used by
-    dispatch_alert_resolution_notifications() in alert_service.py.
-
-    Returns a dict of {email: "sent"} or {email: "failed: <reason>"}
-    per recipient - exactly one outcome per recipient no matter how
-    many attempts it took - this function never raises, so one bad
-    address or a dropped connection mid-batch can't take down the
-    whole request (it runs inside app/core/notification_executor.py's
-    own thread pool anyway, but staying defensive here keeps the
-    per-recipient NotificationLog accurate).
-    """
     results: dict[str, str] = {}
 
     if not settings.SMTP_HOST or not settings.SMTP_USERNAME:
@@ -206,10 +135,7 @@ def send_alert_emails(
         try:
             server = _connect()
         except Exception as exc:
-            # Couldn't even establish the initial connection - still
-            # give it the same transient-retry treatment per recipient
-            # below rather than failing the whole batch outright, in
-            # case it recovers a moment later.
+
             server = None
             initial_connect_error: Exception | None = exc
         else:

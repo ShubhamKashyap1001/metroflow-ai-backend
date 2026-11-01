@@ -17,35 +17,10 @@ from app.services.train_tracking import (
 from app.simulator.train_simulator import get_direction
 from app.utils.geo import STATE_CITY_MAP, cities_for_state
 
-# Client-facing train list had no limit/offset at all - same unbounded-
-# growth gap as station_service.list_stations, and this also bounds
-# list_live_positions()/list_routes() below since both derive their
-# train set from list_trains() without a caller-supplied override
-# (keeping their Redis cache key - state-only - unchanged). Same
-# default-page + hard-cap pattern used there.
 DEFAULT_TRAINS_LIMIT = 500
 MAX_TRAINS_LIMIT = 2000
 
 def _invalidate_train_position_cache() -> None:
-    """Drop every cached `train:positions:*` view a train create/update
-    can affect.
-
-    BUGFIX (missing cache invalidation): list_live_positions() caches
-    its result per state filter (`train:positions:{state or 'all'}`,
-    see below), but create_train()/update_train() used to just commit
-    to Postgres and return - any state's positions view that had
-    already been cached kept serving the pre-write train_number/
-    capacity/is_active etc. for up to CACHE_TTL_SECONDS. Unlike
-    crowd/schedule caches (keyed off a station/schedule this code
-    already has in hand), a train's position cache entries are keyed
-    by *state*, not by train - and which state(s) a given train shows
-    up under depends on which stations its schedule rows touch, which
-    a bare create/update doesn't know. The state list is small and
-    fixed (see app/utils/geo.py's STATE_CITY_MAP), so - same "small
-    enough key space" tradeoff schedule_service.py already documents -
-    it's cheapest and safest to just drop the unfiltered view plus
-    every per-state view rather than try to derive the affected subset.
-    """
     cache.delete("train:positions:all")
     for state in STATE_CITY_MAP:
         cache.delete(f"train:positions:{state}")
@@ -101,11 +76,6 @@ def create_train(db: Session, payload: TrainCreate) -> Train:
     db.commit()
     db.refresh(train)
     _invalidate_train_position_cache()
-    # BUGFIX (remaining N+1 query - see delay_predictor.py's
-    # _fleet_stats): a new train changes the fleet-wide average
-    # capacity/age that predict_delay() falls back to when no specific
-    # train_id is given - drop the cache so that average is recomputed
-    # on next use instead of staying stale for the rest of its TTL.
     invalidate_fleet_stats_cache()
     return train
 
@@ -116,9 +86,6 @@ def update_train(db: Session, train_id: int, payload: TrainUpdate) -> Train:
     db.commit()
     db.refresh(train)
     _invalidate_train_position_cache()
-    # BUGFIX (remaining N+1 query - see delay_predictor.py's
-    # _fleet_stats): capacity/commissioned_date/is_active are all
-    # inputs to the cached fleet-wide average - see create_train above.
     invalidate_fleet_stats_cache()
     return train
 

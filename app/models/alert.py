@@ -22,16 +22,6 @@ class Alert(TimestampMixin, Base):
 
     __tablename__ = "alerts"
 
-    # BUGFIX (slow alert queries at scale): this table had NO indexes
-    # beyond the primary key. alert_service.list_alerts() is hit on
-    # every dashboard alert-feed load - with no filter (ORDER BY
-    # created_at DESC), filtered by station_id, or filtered by
-    # is_resolved - and every one of those was a full Seq Scan.
-    # Measured on a 152k-row table (a few years of a busy multi-city
-    # deployment): default list 35ms -> 0.13ms, active_only filter
-    # 19.5ms -> 0.13ms, station_id filter 8.3ms -> 0.04ms after adding
-    # these three indexes (verified with EXPLAIN ANALYZE before/after,
-    # not added speculatively - see docs/query-performance-and-indexing.md).
     __table_args__ = (
         Index("ix_alerts_created_at", "created_at"),
         Index("ix_alerts_station_id_created_at", "station_id", "created_at"),
@@ -77,5 +67,25 @@ class Alert(TimestampMixin, Base):
         Boolean, default=True, nullable=False
     )
 
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    acknowledged_by_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_profiles.id"), nullable=True
+    )
+    assigned_to_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_profiles.id"), nullable=True
+    )
+
     station = relationship("Station")
-    creator = relationship("UserProfile")
+    creator = relationship("UserProfile", foreign_keys=[created_by])
+    acknowledged_by = relationship("UserProfile", foreign_keys=[acknowledged_by_id])
+    assigned_to = relationship("UserProfile", foreign_keys=[assigned_to_id])
+
+    @property
+    def acknowledged_by_name(self) -> str | None:
+        return self.acknowledged_by.full_name if self.acknowledged_by else None
+
+    @property
+    def assigned_to_name(self) -> str | None:
+        return self.assigned_to.full_name if self.assigned_to else None

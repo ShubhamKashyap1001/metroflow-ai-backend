@@ -20,24 +20,6 @@ from app.websocket.manager import manager
 _train_state: dict[int, dict] = {}
 
 def _invalidate_train_position_cache() -> None:
-    """Drop every cached `train:positions:*` view this tick's position
-    writes can affect.
-
-    BUGFIX (Phase 29A - stale REST reads after a live tick): this is
-    the same helper app/services/train_service.py already defines and
-    calls from create_train()/update_train() - duplicated here rather
-    than imported, because train_service.py imports
-    app.simulator.train_simulator (for get_direction), so importing
-    train_service from here would be a circular import.
-
-    Before this fix, every tick in track_tick() below wrote fresh
-    positions straight to Postgres and correctly broadcast them over
-    the WebSocket, but never touched the Redis cache backing
-    GET /trains/live (train_service.list_live_positions). Any client
-    that reacted to the train_position push by refetching over REST
-    kept getting the previous tick's positions until the cache's TTL
-    happened to expire on its own.
-    """
     cache.delete("train:positions:all")
     for state in STATE_CITY_MAP:
         cache.delete(f"train:positions:{state}")
@@ -165,24 +147,35 @@ def _track_tick_sync(db: Session, tick_seconds: int) -> list[dict]:
 async def track_tick(db: Session, interval_seconds: int) -> list[dict]:
     updates = await asyncio.to_thread(_track_tick_sync, db, interval_seconds)
     if updates:
-        # Phase 4: broadcast_everywhere() - see csv_replay_simulator.py's
-        # replay_tick() for why (same reasoning applies to this loop).
+
         await manager.broadcast_everywhere(
             TRAIN_POSITION,
             {"updates": updates, "timestamp": datetime.now(timezone.utc).isoformat()},
         )
     return updates
 
-async def run_forever(session_factory, interval_seconds: int = 60) -> None:
+async def run_forever(
+    session_factory, interval_seconds: int = 60, *, control_provider=None
+) -> None:
     while True:
+        control = control_provider() if control_provider else None
+        if control is not None:
+            if not control.get("train_enabled", False):
+                await asyncio.sleep(2)
+                continue
+            interval_seconds = int(control.get("train_interval_seconds", interval_seconds))
         db = session_factory()
         try:
             await track_tick(db, interval_seconds)
         except Exception as exc:                
             print(f"[train_simulator] tick failed, will retry next interval: {exc}")
-            # Phase 6: explicit rollback before close - see
-            # csv_replay_simulator.py's run_forever for why.
+
             db.rollback()
         finally:
             db.close()
-        await asyncio.sleep(interval_seconds)
+        if control_provider:
+            from app.simulator.control import wait_for_controlled_tick
+
+            await wait_for_controlled_tick("train", interval_seconds, control_provider)
+        else:
+            await asyncio.sleep(interval_seconds)

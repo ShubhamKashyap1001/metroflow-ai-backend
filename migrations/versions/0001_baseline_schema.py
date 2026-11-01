@@ -3,28 +3,17 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-# revision identifiers, used by Alembic.
 revision: str = "0001_baseline_schema"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-
 def _existing_index_names(inspector: sa.engine.reflection.Inspector, table_name: str) -> set[str]:
-    """Names of indexes that already exist on `table_name`, freshly
-    reflected from the connected database (never cached across calls),
-    so a resumed/duplicated `alembic upgrade head` run always checks
-    the database's actual current state rather than a stale snapshot
-    taken before this revision started creating things."""
     return {ix["name"] for ix in inspector.get_indexes(table_name)}
-
 
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
-
-    # --- Tables (created only if missing - safe no-op on any database
-    # that already has them) ---
 
     if "ai_models" not in inspector.get_table_names():
         op.create_table('ai_models',
@@ -375,10 +364,6 @@ def upgrade() -> None:
             sa.UniqueConstraint('user_id', 'notification_id', name='ux_notification_read_states_user_notification')
             )
 
-
-    # --- Indexes (created only if missing on their table - safe no-op
-    # on any database that already has them) ---
-
     if "user_profiles" not in inspector.get_table_names() or "ix_user_profiles_created_at" not in _existing_index_names(inspector, "user_profiles"):
         op.create_index('ix_user_profiles_created_at', 'user_profiles', ['created_at'], unique=False)
 
@@ -475,10 +460,6 @@ def upgrade() -> None:
     if "notification_read_states" not in inspector.get_table_names() or "ix_notification_read_states_notification_id" not in _existing_index_names(inspector, "notification_read_states"):
         op.create_index('ix_notification_read_states_notification_id', 'notification_read_states', ['notification_id'], unique=False)
 
-
 def downgrade() -> None:
-    # No-op by design - see module docstring. This is the schema
-    # baseline; there is nothing before it to revert to, and dropping
-    # every table here would be exactly the kind of destructive
-    # operation this migration process exists to prevent.
+
     pass

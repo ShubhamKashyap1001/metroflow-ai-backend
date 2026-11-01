@@ -1,33 +1,3 @@
-"""One-off migration to add the index declared on
-TrainSchedule.__table_args__ (app/models/train_schedule.py):
-
-    ix_train_schedules_day_type_departure_time
-
-Added after a query-analysis pass (docs/query-performance-and-indexing.md)
-identified schedule_service.get_upcoming_schedules() - the Dispatch
-Board's "Upcoming Train Schedule" widget - as the slowest verified
-query in the app under realistic data volume. It filters
-train_schedules on day_type + departure_time and orders by
-departure_time; none of the pre-existing indexes include
-departure_time at all, so every call did a full Seq Scan followed by
-an explicit Sort. This composite index lets Postgres satisfy both the
-filter and the ORDER BY straight from the index.
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. If your
-`train_schedules` table was created before this update, run this once:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_schedule_departure_index
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on train_schedules while building (relevant here
-since handle_delay()/adjust_frequency() write to it) - note that
-CONCURRENTLY can't run inside a transaction block, hence the
-isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -37,7 +7,6 @@ INDEXES = [
     ("ix_train_schedules_day_type_departure_time", "day_type, departure_time"),
 ]
 
-
 def _masked_database_url() -> str:
     url = settings.DATABASE_URL
     if "@" in url and "//" in url:
@@ -46,7 +15,6 @@ def _masked_database_url() -> str:
         user = creds.split(":", 1)[0]
         return f"{scheme}//{user}:***@{rest}"
     return url
-
 
 def run():
     print(f"Connecting to: {_masked_database_url()}\n")
@@ -81,7 +49,6 @@ def run():
             "double check DATABASE_URL matches the database your uvicorn "
             "process is actually using."
         )
-
 
 if __name__ == "__main__":
     run()

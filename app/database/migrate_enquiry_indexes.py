@@ -1,29 +1,3 @@
-"""One-off migration to add the three indexes declared on
-Enquiry.__table_args__ (app/models/enquiry.py):
-
-    ix_enquiries_user_id_created_at
-    ix_enquiries_status
-    ix_enquiries_created_at
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. The
-`enquiries` table originally shipped with NO indexes beyond its primary
-key, so if it was created before this update, run this once so
-enquiry_service.py's list_enquiries() (the "My Enquiries" page and the
-admin "manage enquiries" queue) and get_enquiry_stats() stop doing a
-full table scan on every call:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_enquiry_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on enquiries while building (relevant here since
-create_enquiry()/resolve_enquiry() write to it) - note that
-CONCURRENTLY can't run inside a transaction block, hence the
-isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

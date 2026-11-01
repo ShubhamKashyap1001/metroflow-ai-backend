@@ -1,34 +1,3 @@
-"""One-off migration to add the indexes declared on
-Prediction.__table_args__ (app/models/prediction.py):
-
-    ix_predictions_created_at
-    ix_predictions_station_id_type_target
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. The
-`predictions` table originally shipped with NO indexes beyond its
-primary key, so if it was created before this update, run this once so:
-
-  - analytics_service.py::prediction_insights() (the AI Prediction
-    dashboard's "recent predictions" feed) stops doing a full table
-    sort of the entire predictions history on every call
-    (ix_predictions_created_at), and
-  - prediction_service.py::_get_or_save_prediction()'s get-or-create
-    lookup (see its docstring - the fix for unnecessary duplicate
-    prediction writes on a cache hit) doesn't itself become a full
-    table scan on every cache hit (ix_predictions_station_id_type_target)
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_prediction_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on predictions while building (relevant here since
-predictions are written continuously) - note that CONCURRENTLY can't
-run inside a transaction block, hence the isolation_level="AUTOCOMMIT"
-connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

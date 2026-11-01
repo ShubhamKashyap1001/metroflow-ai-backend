@@ -51,9 +51,6 @@ def _simulated_email(index: int) -> str:
     return f"passenger-{index:03d}@{SIMULATED_EMAIL_DOMAIN}"
 
 def ensure_simulated_passengers(db: Session) -> list[UserProfile]:
-    """Idempotently creates (or loads) the virtual passenger pool.
-    Deterministic UUIDs (uuid5 of the email) so re-running this never
-    creates duplicates across restarts."""
     pool_size = settings.SIMULATOR_PASSENGER_POOL_SIZE
     passengers = (
         db.query(UserProfile)
@@ -95,13 +92,6 @@ def _expected_travel_minutes(journey: Journey, stations_by_id: dict[int, dict]) 
     return max(MIN_TRIP_MINUTES, (distance_km / ASSUMED_SPEED_KMPH) * 60)
 
 def _simulate_tick_sync(db: Session) -> list[dict]:
-    """All the actual DB/CPU work for one tick, as a plain sync
-    function. Called via asyncio.to_thread() from simulate_tick() so
-    this runs on a worker thread instead of blocking the single
-    asyncio event loop that also serves every HTTP/WebSocket request -
-    a synchronous SQLAlchemy Session doing several queries per station
-    every tick was previously freezing the whole API (including login-
-    adjacent requests like /auth/me) for the duration of each tick."""
     passengers = ensure_simulated_passengers(db)
     changed_station_ids: set[int] = set()
     stations = _load_stations(db)
@@ -139,22 +129,6 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
             prediction = predict_crowd(station["id"], datetime.now(timezone.utc), light=True)
             weights.append(max(1.0, prediction["predicted_count"]))
 
-        # Starvation guard: with a real metro network this list can run
-        # into the hundreds of stations, and the AI model's predicted
-        # count for any station it wasn't trained on (e.g. a station
-        # added to the DB after the last `train_crowd_model.py` run, or
-        # an interchange/"connector" stop the model saw very little of)
-        # falls back to the 1.0 floor above. A weight of 1.0 next to
-        # peers weighted in the hundreds is effectively zero under
-        # random.choices() - across thousands of ticks that station's
-        # selection probability stays low enough that it can go a full
-        # 24h (or longer) without a single check-in, which is exactly
-        # what left "Noida Sector 51 [Conn: Blue]" stuck at 0 inflow/
-        # outflow while every normally-weighted station kept filling
-        # in fine. Re-floor every weight to a fixed fraction of the
-        # tick's mean weight so no active station's odds of being
-        # picked ever collapse to near-zero just because the model has
-        # little/no signal for it yet.
         if weights:
             mean_weight = sum(weights) / len(weights)
             min_weight = max(1.0, mean_weight * 0.15)
@@ -197,20 +171,12 @@ def _simulate_tick_sync(db: Session) -> list[dict]:
     return updates
 
 async def simulate_tick(db: Session) -> list[dict]:
-    """Runs the sync tick body on a worker thread (so it never blocks
-    the event loop), then broadcasts the result over the WebSocket
-    from the loop itself - manager.broadcast() awaits a websocket
-    send, which must happen on the real event loop, not a worker
-    thread."""
     updates = await asyncio.to_thread(_simulate_tick_sync, db)
     if updates:
         await manager.broadcast(CROWD_UPDATE, {"updates": updates, "timestamp": datetime.now(timezone.utc).isoformat()})
     return updates
 
 async def run_forever(session_factory, interval_seconds: int = 30) -> None:
-    """Background loop: call once at startup with
-    `asyncio.create_task(run_forever(SessionLocal))`.
-    """
     while True:
         db = session_factory()
         try:

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.enums.day_type import DayType
@@ -45,7 +45,6 @@ def peak_hour_schedules(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    """Peak-hour optimization: currently flagged peak-hour slots."""
     return schedule_service.peak_hour_schedules(db, station_id, state, limit, offset)
 
 @router.get("/delayed", response_model=list[TrainScheduleResponse])
@@ -56,7 +55,6 @@ def delayed_schedules(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    """Delay handling: currently delayed schedule entries."""
     return schedule_service.delayed_schedules(db, station_id, state, limit, offset)
 
 @router.get("/delayed/count")
@@ -65,9 +63,6 @@ def delayed_schedules_count(
     state: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Lightweight counterpart to /delayed - total count of currently
-    delayed schedules (same filters), for the dashboard's Recent Alerts
-    widget, which only needs the number rather than the capped list."""
     return {"count": schedule_service.delayed_schedules_count(db, station_id, state)}
 
 @router.get("/upcoming")
@@ -77,10 +72,18 @@ def upcoming_schedules(
     limit: int = 20,
     db: Session = Depends(get_db),
 ):
-    """Feed for the dashboard's "Upcoming Train Schedule" widget - next
-    departures with train, line, from/to stations and live status.
-    `state` scopes to one city, `status` filters to on_time/delayed."""
     return schedule_service.get_upcoming_schedules(db, state, status, limit)
+
+@router.post("/optimization/preview")
+@limiter.limit("5/minute")
+def preview_peak_frequency_optimization(
+    request: Request,
+    state: str | None = None,
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
+    return schedule_service.build_peak_frequency_optimization_preview(db, state, limit)
 
 @router.get("/{schedule_id}", response_model=TrainScheduleResponse)
 def get_schedule(schedule_id: int, db: Session = Depends(get_db)):
@@ -116,7 +119,6 @@ def report_delay(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    """Delay handling workflow."""
     return schedule_service.handle_delay(db, schedule_id, payload)
 
 @router.patch("/{schedule_id}/frequency", response_model=TrainScheduleResponse)
@@ -128,5 +130,4 @@ def adjust_frequency(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    """Frequency adjustment workflow."""
     return schedule_service.adjust_frequency(db, schedule_id, payload)

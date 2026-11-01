@@ -1,35 +1,3 @@
-"""One-off migration to add the alert/notification indexes declared in
-(app/models/alert.py, app/models/notification.py,
-app/models/notification_log.py):
-
-    ix_alerts_created_at
-    ix_alerts_station_id_created_at
-    ix_alerts_is_resolved_created_at
-    ix_notifications_created_at_is_read_user_id
-    ix_notification_logs_alert_id_created_at
-
-Same rationale/pattern as migrate_enquiry_indexes.py,
-migrate_journey_indexes.py, etc.: this project doesn't use Alembic -
-app/database/init_db.py just calls Base.metadata.create_all(), which
-only creates tables that don't exist yet and never adds an index to a
-table that already exists. These three tables originally shipped with
-NO indexes beyond their primary key, so if they were created before
-this update, run this once so alert_service.list_alerts(),
-notification_service.list_notifications()/unread_count(), and
-alert_service.list_alert_notifications() stop doing a full table scan
-on every call. See docs/query-performance-and-indexing.md for the before/after
-EXPLAIN ANALYZE numbers this was based on.
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_alert_notification_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so
-it doesn't lock writes on these tables while building (alerts/
-notifications/notification_logs are all written to continuously by
-live traffic) - note that CONCURRENTLY can't run inside a transaction
-block, hence the isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

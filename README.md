@@ -40,13 +40,14 @@ AI-powered metro operations platform: live train tracking, crowd/demand monitori
 │    • Train tracker (moves trains along their routes)               │
 │    • Crowd-log retention / rollup                                  │
 │    • Notification-bin retention                                    │
+│    • Scheduled report delivery                                     │
 │                                                                     │
 │  ML layer (app/ai_engine): 3 predictors, lazy-loaded & cached      │
 └───────────┬───────────────────────┬────────────────────┬──────────┘
             │                       │                    │
             ▼                       ▼                    ▼
       PostgreSQL              Redis (cache,        Gemini API
-   (21 tables, Alembic)    leader-election lease,   (chatbot)
+   (22 tables, Alembic)    leader-election lease,   (chatbot)
                              pub/sub relay,
                              response cache)
 ```
@@ -108,7 +109,7 @@ Auth is fully delegated to **Supabase**. The backend never sees a password — i
 
 ## 6. Database
 
-PostgreSQL, 21 tables (stations, trains, schedules, crowd logs + hourly rollups, journeys/check-ins, alerts, notifications + dispatch jobs, enquiries, news, user profiles, predictions, AI model registry, metro lines/routes). Schema lives in a single Alembic baseline migration (`migrations/versions/0001_baseline_schema.py`), with `alembic upgrade head` run automatically before the app starts serving traffic.
+PostgreSQL, 22 tables (stations, trains, schedules, crowd logs + hourly rollups, journeys/check-ins, alerts, notifications + dispatch jobs, enquiries, news, user profiles, predictions, AI model registry, metro lines/routes). Schema is managed by an Alembic migration chain (including `0006_reports_and_freshness.py`), with `alembic upgrade head` run automatically before the app starts serving traffic.
 
 ## 7. Project layout
 
@@ -155,3 +156,5 @@ curl http://localhost:8000/healthz
 ```
 
 See `DEPLOYMENT.md` for Render / AWS EC2 deployment steps.
+
+External feed ingestion, schedule optimization, and alert bridge contracts are documented in `docs/external-data-and-operations.md`.

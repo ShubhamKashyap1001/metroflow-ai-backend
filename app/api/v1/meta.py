@@ -1,9 +1,3 @@
-"""State-wise metadata for the frontend's navbar state selector.
-
-Not a data module of its own - just aggregates Station/Train counts
-per state so the UI knows which states have real, seeded data (and
-which ones need more CSV rows before they're worth showing).
-"""
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
+from app.core.config import settings
 from app.models.station import Station
 from app.models.train import Train
 from app.models.train_schedule import TrainSchedule
@@ -21,11 +16,20 @@ router = APIRouter(
     tags=["Meta"]
 )
 
+@router.get("/data-sources")
+def get_data_sources():
+    return {
+        "passenger_flow": "dataset_replay" if settings.ENABLE_SIMULATOR else "stored_database",
+        "train_positions": "simulator_tracking" if settings.ENABLE_TRAIN_TRACKING else "stored_database",
+        "operator_realtime_feed": "not_connected",
+        "sensor_ingest": "configured" if settings.SENSOR_INGEST_API_KEY else "not_configured",
+        "metro_train_ingest": "configured" if settings.METRO_TRAIN_INGEST_API_KEY else "not_configured",
+        "public_address": "configured" if settings.PUBLIC_ADDRESS_WEBHOOK_URL and settings.PUBLIC_ADDRESS_WEBHOOK_TOKEN else "not_configured",
+        "mobile_push": "configured" if settings.MOBILE_PUSH_WEBHOOK_URL and settings.MOBILE_PUSH_WEBHOOK_TOKEN else "not_configured",
+    }
+
 @router.get("/states")
 def list_states(db: Session = Depends(get_db)):
-    """One row per Indian state MetroFlow knows about, with how much
-    real data is seeded for it - drives the navbar state picker and
-    the "not enough data yet" banner on each dashboard."""
     station_counts = dict(
         db.query(Station.city, func.count(Station.id))
         .filter(Station.is_active.is_(True))
@@ -57,9 +61,6 @@ def list_states(db: Session = Depends(get_db)):
 
 @router.get("/cities")
 def list_cities(db: Session = Depends(get_db)):
-    """One row per city that actually has station data seeded - drives
-    the navbar's city picker. A new city shows up here automatically
-    the moment stations for it are added, no code change required."""
     station_counts = dict(
         db.query(Station.city, func.count(Station.id))
         .filter(Station.is_active.is_(True))
@@ -94,7 +95,6 @@ def list_cities(db: Session = Depends(get_db)):
     return sorted(results, key=lambda r: r["city"])
 
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Great-circle distance in km between two real lat/lng points."""
     r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -108,12 +108,6 @@ def nearest_city(
     lng: float = Query(..., ge=-180, le=180, description="Browser geolocation longitude"),
     db: Session = Depends(get_db),
 ):
-    """Given the rider's real GPS coordinates (from the browser's
-    Geolocation permission), finds the closest MetroFlow city using
-    each seeded station's real latitude/longitude - no hardcoded city
-    centroids, no fake data. Powers the "Use my location" control in
-    the navbar city picker.
-    """
     stations = (
         db.query(Station.city, Station.latitude, Station.longitude)
         .filter(Station.is_active.is_(True))

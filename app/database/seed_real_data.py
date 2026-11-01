@@ -4,18 +4,7 @@ import os
 import time
 from datetime import date, datetime
 
-# This script reuses app.database.session's engine, which - by design -
-# sets a 30s Postgres statement_timeout on every connection
-# (DB_STATEMENT_TIMEOUT_MS in app/core/config.py) so a stuck live API
-# request can never hang forever. That's the right call for the API,
-# but it's exactly wrong for THIS script: a --reset TRUNCATE across 12
-# FK-linked tables, or a several-hundred-thousand-row bulk insert, can
-# legitimately take minutes - especially when run from a machine
-# outside Render's network. Overriding it here (env var must be set
-# BEFORE app.database.config/database are imported below, since that's
-# when the engine/connect_args are actually built) gives this one
-# script a generous timeout without touching the API's own safety net.
-os.environ.setdefault("DB_STATEMENT_TIMEOUT_MS", str(10 * 60 * 1000))  # 10 min
+os.environ.setdefault("DB_STATEMENT_TIMEOUT_MS", str(10 * 60 * 1000))  
 
 import pandas as pd
 from sqlalchemy import text
@@ -41,21 +30,6 @@ from app.models.train_schedule import TrainSchedule
 from app.models.train_schedule_history import TrainScheduleHistory
 
 def _bulk_insert_with_retry(db, model, rows, attempts: int = 8, backoff_seconds: float = 5.0) -> None:
-    """bulk_insert_mappings + commit, retried on a transient dropped/
-    reset connection or DNS blip (psycopg2.OperationalError - "server
-    closed the connection unexpectedly", "could not translate host
-    name", etc.) instead of losing the whole run. Doesn't retry other
-    errors (bad data, constraint violations, etc.) - those should
-    still fail loudly and immediately.
-
-    Backoff DOUBLES each attempt (5s, 10s, 20s, 40s, 60s, 60s, 60s) -
-    a DNS/Wi-Fi blip on a home connection can take longer than a flat
-    3s to clear, so a fixed short retry just burns through its
-    attempts too fast. Also disposes the engine's connection pool
-    before retrying, so the next attempt does a completely fresh
-    TCP + DNS connect instead of possibly reusing a connection object
-    left in a bad state by the failure that just happened.
-    """
     for attempt in range(1, attempts + 1):
         try:
             db.bulk_insert_mappings(model, rows)
@@ -72,59 +46,20 @@ def _bulk_insert_with_retry(db, model, rows, attempts: int = 8, backoff_seconds:
                   f"retrying in {wait:.0f}s...")
             time.sleep(wait)
 
-
 DEFAULT_DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "source")
 
 DEFAULT_CAPACITY = 2400
 
-# Render Free (512MB) OOM fix: passenger_flow.csv.gz and
-# train_operations.csv.gz are both several-hundred-thousand-row files.
-# Loading either one fully into a DataFrame (let alone both at once,
-# which is what _load_csvs() used to do for all 4 CSVs) can exceed a
-# 512MB instance's memory. CSV_CHUNK_SIZE bounds how many rows of
-# either file are ever resident in memory at once - everything that
-# reads these two files below streams them with pd.read_csv(...,
-# chunksize=CSV_CHUNK_SIZE) instead of reading them whole.
 CSV_CHUNK_SIZE = 50_000
 
 def _derive_station_capacities(flow_df: pd.DataFrame) -> dict[str, int]:
-    """Reverse-engineer each station's real capacity from the dataset's
-    own crowding_index column instead of hardcoding one number for
-    every station (Phase 3 fix, Bug 2 - see docs/crowd-data-correctness.md).
-
-    crowding_index is defined by the dataset as
-    (entries + exits) / capacity, clipped at 1.5 for real overcrowding
-    (verified: max observed crowding_index across the whole dataset is
-    exactly 1.5). Solving for capacity per row
-    (`(entries + exits) / crowding_index`) and taking the PER-STATION
-    MEDIAN (not mean, so a handful of clipped/extreme rows can't skew
-    it) recovers a stable, station-specific capacity.
-    """
     df = flow_df[flow_df["crowding_index"] > 0].copy()
     df["implied_capacity"] = (df["entries"] + df["exits"]) / df["crowding_index"]
     return df.groupby("station_id")["implied_capacity"].median().round().astype(int).to_dict()
 
-
 def _build_seed_crowd_rows(
     flow_df: pd.DataFrame, station_rows: dict[str, Station]
 ) -> tuple[list[CrowdLog], list[dict]]:
-    """Seed BOTH the historical table (crowd_logs) and the live table
-    (station_crowd_state) with real, correctly-computed values instead
-    of the old single fabricated "average throughput" row per station
-    (Phase 3 fix, Bug 3 - see docs/crowd-data-correctness.md).
-
-    Walks each station's own real first calendar day of
-    passenger_flow.csv rows (chronological order) through the SAME
-    net-flow occupancy accumulator csv_replay_simulator.py uses at
-    runtime (occupancy += entries - exits, clamped at 0) - so the seed
-    data and the live simulator agree on what "current_count" means,
-    instead of the seed using throughput and the simulator using
-    occupancy. The last hour of that walk becomes each station's
-    initial `station_crowd_state` row, which fixes the second half of
-    Bug 3: previously station_crowd_state was left completely empty
-    until the simulator's first tick, so the dashboard/heatmap had no
-    live data for however long that took.
-    """
     df = flow_df.sort_values(["station_id", "timestamp"])
     crowd_logs: list[CrowdLog] = []
     live_state_rows: list[dict] = []
@@ -157,20 +92,9 @@ def _build_seed_crowd_rows(
 
     return crowd_logs, live_state_rows
 
-
 def _derive_station_capacities_chunked(
     path: str, chunksize: int = CSV_CHUNK_SIZE
 ) -> dict[str, int]:
-    """Memory-bounded equivalent of _derive_station_capacities() for the
-    OOM fix: streams passenger_flow.csv.gz in row-bounded chunks
-    (reading only the station_id/entries/exits/crowding_index columns
-    it needs, not the other ~12 columns in the file) instead of
-    requiring the whole file as one DataFrame, then computes the exact
-    same per-station median implied-capacity over the full accumulated
-    set at the end. Produces byte-for-byte the same dict as calling
-    _derive_station_capacities() on the whole file at once (verified
-    against this dataset while building this fix).
-    """
     by_station: dict[str, list[float]] = {}
     usecols = ["station_id", "entries", "exits", "crowding_index"]
     for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
@@ -187,13 +111,7 @@ def _derive_station_capacities_chunked(
         for station_id, values in by_station.items()
     }
 
-
 def _first_day_per_station(path: str, chunksize: int = CSV_CHUNK_SIZE) -> dict[str, date]:
-    """Pass 1/2 of the chunked crowd-row build (OOM fix): finds each
-    station's earliest calendar date in passenger_flow.csv.gz by
-    streaming only the station_id/timestamp columns in bounded
-    chunks - never the whole file, and only a single running-minimum
-    date per station is kept in memory."""
     first_day: dict[str, date] = {}
     usecols = ["station_id", "timestamp"]
     for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
@@ -207,21 +125,9 @@ def _first_day_per_station(path: str, chunksize: int = CSV_CHUNK_SIZE) -> dict[s
                 first_day[station_id] = day
     return first_day
 
-
 def _collect_first_day_flow_rows(
     path: str, first_day: dict[str, date], chunksize: int = CSV_CHUNK_SIZE
 ) -> pd.DataFrame:
-    """Pass 2/2 of the chunked crowd-row build (OOM fix): re-streams
-    passenger_flow.csv.gz and keeps only each station's own first
-    calendar day of rows (the small subset _build_seed_crowd_rows()
-    actually uses - typically ~1 day's worth of readings per station),
-    with entries/exits clamped to 0 exactly like the non-chunked
-    flow_df preprocessing in seed() used to do. The small resulting
-    DataFrame is then handed to the UNMODIFIED _build_seed_crowd_rows(),
-    which produces identical output to running it on the full file,
-    because that function already restricts itself to each station's
-    first day internally (verified against this dataset while building
-    this fix)."""
     usecols = ["station_id", "timestamp", "entries", "exits"]
     matched_chunks: list[pd.DataFrame] = []
     for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize):
@@ -240,12 +146,7 @@ def _collect_first_day_flow_rows(
         return pd.DataFrame(columns=usecols)
     return pd.concat(matched_chunks, ignore_index=True)
 
-
 def _count_data_rows(path: str) -> int:
-    """Cheap line count (header excluded), used only for the progress
-    print in the train_operations loop below - reads the gzip stream
-    as raw lines, never materializes the file as a DataFrame, so it
-    doesn't defeat the point of the chunked-loading OOM fix."""
     with gzip.open(path, "rb") as f:
         return sum(1 for _ in f) - 1
 
@@ -264,22 +165,7 @@ def _color_for_line(line_name: str, fallback_index: int) -> str:
     return LINE_COLORS[fallback_index % len(LINE_COLORS)]
 
 def _load_csvs(dataset_dir: str) -> dict[str, object]:
-    # Gzipped (.csv.gz) to stay under GitHub's 100MB per-file push limit -
-    # pandas infers the compression from the ".gz" extension on its own,
-    # so pd.read_csv below needs no other change.
-    #
-    # OOM fix: stations.csv.gz and trains.csv.gz are tiny (well under a
-    # MB) and are still loaded fully with pd.read_csv, same as before -
-    # that part was never the problem. passenger_flow.csv.gz and
-    # train_operations.csv.gz are the two large (multi-hundred-thousand
-    # row) files that caused Render Free (512MB) to OOM when all 4 CSVs
-    # were read into memory simultaneously. Those two are now returned
-    # as file PATHS instead of DataFrames - seed() streams each of them
-    # in bounded chunks (see _derive_station_capacities_chunked,
-    # _first_day_per_station, _collect_first_day_flow_rows, and the
-    # train_operations loop below), so neither is ever fully
-    # materialized in RAM, and the two are never held in memory at the
-    # same time either.
+
     paths = {
         "stations": os.path.join(dataset_dir, "stations.csv.gz"),
         "trains": os.path.join(dataset_dir, "trains.csv.gz"),
@@ -327,10 +213,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
             subset=["station_id", "city", "line", "station_name", "latitude", "longitude"]
         )
 
-        # OOM fix: streams passenger_flow.csv.gz in bounded chunks
-        # instead of loading it whole - see
-        # _derive_station_capacities_chunked() for the equivalence
-        # note.
         capacities = _derive_station_capacities_chunked(raw["passenger_flow_path"])
 
         station_rows: dict[str, Station] = {}
@@ -398,29 +280,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         print(f"  stations/lines/trains: {len(station_list)} stations, "
               f"{len(line_list)} lines, {len(train_list)} trains committed.")
 
-        # OOM fix: train_operations.csv.gz is streamed in bounded
-        # chunks (only the columns actually used below are read - see
-        # TRAIN_OPS_USECOLS) instead of being loaded and sorted as one
-        # whole DataFrame.
-        #
-        # The original code relied on a full
-        # ops_df.sort_values(["train_id", "station_id",
-        # "scheduled_arrival"]) so that, walking rows in that order,
-        # "last write wins" left each (train, station, day_type)
-        # timetable slot holding its chronologically most recent
-        # occurrence. Sorting the whole file would require holding it
-        # entirely in memory again, defeating the point of chunking.
-        # Instead, timetable_slot_arrival below tracks the latest
-        # scheduled_arrival seen so far per slot and only overwrites
-        # timetable_by_slot when a row's arrival is >= that value -
-        # an order-independent equivalent that keeps the same
-        # "chronologically most recent occurrence wins" result
-        # regardless of chunk/row order (verified against this
-        # dataset while building this fix). Full-granularity history
-        # rows are unaffected: they're all inserted regardless of
-        # order, so streaming them in file order instead of sorted
-        # order changes nothing about which rows end up in the table,
-        # only their incidental physical insertion order.
         TRAIN_OPS_USECOLS = [
             "trip_id", "train_id", "station_id", "station_sequence",
             "scheduled_arrival", "scheduled_departure", "actual_arrival",
@@ -465,7 +324,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                 delay_departure = float(orow.get("delay_departure_min", 0) or 0)
                 station_sequence = int(orow["station_sequence"])
 
-                # 1. Full-granularity history row - always inserted.
                 history_dicts.append({
                     "trip_id": str(orow["trip_id"]),
                     "train_id": train.id,
@@ -488,9 +346,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
                     print(f"  train_schedule_history: {history_inserted}/{total_ops_rows - dropped} inserted...", end="\r")
                     history_dicts = []
 
-                # 2. Canonical timetable slot - keep whichever
-                # occurrence has the chronologically latest
-                # scheduled_arrival for this slot (see note above).
                 slot_key = (train.id, db_station.id, day_type)
                 if slot_key not in timetable_slot_arrival or arrival_dt >= timetable_slot_arrival[slot_key]:
                     timetable_slot_arrival[slot_key] = arrival_dt
@@ -521,22 +376,6 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         print(f"  train_schedules: {len(timetable_dicts)} canonical slots inserted "
               f"(collapsed from {history_inserted} historical rows).")
 
-        # Phase 3 fix (Bug 3): both entries here are now built by
-        # _build_seed_crowd_rows() from a REAL, correctly-computed
-        # net-flow occupancy walk (entries - exits, clamped at 0) over
-        # each station's actual first calendar day of passenger_flow
-        # rows - not `entries + exits` averaged across the whole
-        # dataset (which was the same throughput-as-occupancy bug as
-        # Bug 1, just in the seed script instead of the simulator).
-        # station_crowd_state is now seeded too, so the live
-        # dashboard/heatmap have real data immediately instead of
-        # being empty until the simulator's first tick.
-        # OOM fix: streams passenger_flow.csv.gz in two bounded-memory
-        # passes (first to find each station's earliest calendar day,
-        # then to collect just that day's rows) instead of loading the
-        # whole file - see _first_day_per_station() and
-        # _collect_first_day_flow_rows() for the equivalence note.
-        # _build_seed_crowd_rows() itself is unchanged.
         first_day = _first_day_per_station(raw["passenger_flow_path"])
         flow_df = _collect_first_day_flow_rows(raw["passenger_flow_path"], first_day)
 
@@ -544,25 +383,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.add_all(crowd_rows)
         db.flush()
         if live_state_rows:
-            # station_crowd_state is a "current fact" table with
-            # station_id as its PRIMARY KEY (see app/models/
-            # station_crowd_state.py) - by design it holds exactly
-            # ONE row per station, upserted in place, never appended
-            # to. A plain bulk_insert_mappings() here hard-fails with
-            # a UniqueViolation the moment this row already exists -
-            # e.g. on any re-run of this script against a database
-            # that wasn't (or couldn't be) fully wiped by --reset, or
-            # if any upstream retry ever produces the same station_id
-            # twice in one batch. Use an upsert instead so seeding
-            # this table is always idempotent, matching how every
-            # other writer of this table (simulator/checkin/checkout)
-            # already treats it.
-            #
-            # Dedupe in Python first too, so two rows for the same
-            # station_id within a single batch can never collide with
-            # EACH OTHER inside the same INSERT statement (last one
-            # wins) - ON CONFLICT alone only protects against rows
-            # already committed in the table.
+
             deduped_rows = list({row["station_id"]: row for row in live_state_rows}.values())
             stmt = pg_insert(StationCrowdState).values(deduped_rows)
             stmt = stmt.on_conflict_do_update(
@@ -592,7 +413,7 @@ def seed(dataset_dir: str = DEFAULT_DATASET_DIR, reset: bool = False) -> None:
         db.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Load station, line, train, schedule, and passenger flow data.")
     parser.add_argument("--dir", default=DEFAULT_DATASET_DIR, help="Folder containing the 4 CSVs")
     parser.add_argument("--reset", action="store_true", help="Wipe existing station/line/schedule/crowd data first")
     args = parser.parse_args()

@@ -1,39 +1,4 @@
 #!/usr/bin/env python3
-"""Production-like realtime load test for app/websocket/manager.py.
-
-Scope, per request: check ONLY for duplicate / missed / delayed
-WebSocket events *across worker processes* under sustained concurrent
-load, and fix ONLY verified failures. This is a heavier, adversarial
-sibling of scripts/verify_ws_manager.py and
-scripts/verify_ws_relay_reconnect.py (which check correctness on
-small, hand-picked inputs) - this one throws production-shaped load
-at the same real, unmodified ConnectionManager class:
-
-  - N simulated worker PROCESSES (separate `app.websocket.manager`
-    module instances, each with its own ConnectionManager, event loop
-    thread, and relay thread) sharing one fake Redis pub/sub bus -
-    mirrors N uvicorn workers behind a load balancer sharing one real
-    Redis.
-  - Hundreds of concurrently-open client connections spread across
-    those workers, including users with multiple tabs open on
-    DIFFERENT workers (the case that actually exercises the relay).
-  - A concurrent flood of publishers hammering notify()/notify_user()
-    from many OS threads at once (mirroring FastAPI's sync threadpool
-    under concurrent request load), overlapped with async broadcast()
-    calls from a simulated "leader" worker's ticking simulator loop.
-  - Precise, timestamped, sequence-numbered payloads so every
-    delivery can be checked for exactly-once receipt and for
-    publish-to-delivery latency, per client, per worker.
-
-Same environment constraint as the other verify_ws_*.py scripts: no
-network access in this sandbox, so fastapi/redis are faked exactly as
-in scripts/verify_ws_manager.py (see that file's own docstring for
-why this still exercises the real manager.py code, not a re-model of
-it).
-
-Exit code is non-zero if any duplicate, missed, or over-threshold-
-delayed event is observed.
-"""
 import asyncio
 import json
 import random
@@ -50,12 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-# ---------------------------------------------------------------------------
-# Fake fastapi.WebSocket - records (payload, receipt_monotonic_time) per send
-# so we can check ordering/duplication/latency, not just final counts.
-# ---------------------------------------------------------------------------
 fake_fastapi = types.ModuleType("fastapi")
-
 
 class FakeWebSocket:
     def __init__(self, name: str):
@@ -68,14 +28,10 @@ class FakeWebSocket:
         self.accepted = True
 
     async def send_text(self, payload: str):
-        # A real ASGI send has non-zero cost; a tiny sleep keeps many
-        # concurrent sends from being unrealistically instantaneous
-        # (and exercises the manager's asyncio.gather concurrency
-        # rather than a tight sequential loop).
+
         await asyncio.sleep(0.0005)
         with self._lock:
             self.received.append((payload, time.monotonic()))
-
 
 fake_fastapi.WebSocket = FakeWebSocket
 sys.modules["fastapi"] = fake_fastapi
@@ -87,11 +43,7 @@ core_pkg.__path__ = []
 sys.modules.setdefault("app", app_pkg)
 sys.modules.setdefault("app.core", core_pkg)
 
-
 class FakeBus:
-    """Shared in-memory pub/sub bus standing in for one real Redis
-    server shared by every worker process. Thread-safe: many worker
-    threads publish concurrently under real load."""
 
     def __init__(self):
         self._subscribers: dict[str, list["FakePubSub"]] = {}
@@ -108,7 +60,6 @@ class FakeBus:
     def _register(self, channel: str, pubsub: "FakePubSub"):
         with self._lock:
             self._subscribers.setdefault(channel, []).append(pubsub)
-
 
 class FakePubSub:
     def __init__(self, bus: FakeBus):
@@ -130,7 +81,6 @@ class FakePubSub:
     def close(self):
         self.closed = True
 
-
 class FakeRedisClient:
     def __init__(self, bus: FakeBus):
         self.bus = bus
@@ -141,17 +91,13 @@ class FakeRedisClient:
     def pubsub(self):
         return FakePubSub(self.bus)
 
-
 def make_fake_cache_module(bus: FakeBus):
     mod = types.ModuleType("app.core.cache")
     client = FakeRedisClient(bus)
     mod.get_client = lambda: client
     return mod
 
-
 def fresh_manager_module(bus: FakeBus, tag: str):
-    """Each call = a fresh `app.websocket.manager` import, wired to the
-    shared bus - i.e. a genuinely separate simulated worker process."""
     for name in ("app.websocket.manager", "app.websocket.events", "app.websocket",
                  "app.core.cache"):
         sys.modules.pop(name, None)
@@ -164,10 +110,7 @@ def fresh_manager_module(bus: FakeBus, tag: str):
     mod._WORKER_TAG = tag
     return mod
 
-
 class Worker:
-    """One simulated uvicorn worker process: its own ConnectionManager,
-    event loop (background thread), and relay thread."""
 
     def __init__(self, tag: str, bus: FakeBus):
         self.tag = tag
@@ -194,14 +137,11 @@ class Worker:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=2)
 
-
 results = []
-
 
 def check(label, condition):
     results.append((label, bool(condition)))
     print(f"{'PASS' if condition else 'FAIL'} - {label}")
-
 
 def wait_until(predicate, timeout=6.0, interval=0.02):
     deadline = time.monotonic() + timeout
@@ -211,20 +151,15 @@ def wait_until(predicate, timeout=6.0, interval=0.02):
         time.sleep(interval)
     return predicate()
 
-
-# ---------------------------------------------------------------------------
-# Load test
-# ---------------------------------------------------------------------------
 NUM_WORKERS = 6
 ANON_CLIENTS_PER_WORKER = 15
-NUM_SHARED_USERS = 20          # users with a tab open on 2 different workers
-STATION_ALERT_EVENTS = 900     # non-coalesced, uniquely-sequenced events
-NOTIFICATION_EVENTS = 600      # per-user targeted, uniquely-sequenced
-CROWD_UPDATE_BURSTS = 500      # coalesced events, fired in tight concurrent bursts
+NUM_SHARED_USERS = 20          
+STATION_ALERT_EVENTS = 900     
+NOTIFICATION_EVENTS = 600      
+CROWD_UPDATE_BURSTS = 500      
 NUM_STATIONS = 12
 PUBLISHER_THREADS = 24
-LATENCY_WARN_SECONDS = 1.0     # "delayed" threshold for this scope of test
-
+LATENCY_WARN_SECONDS = 1.0     
 
 def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
          num_shared_users=NUM_SHARED_USERS, station_alert_events=STATION_ALERT_EVENTS,
@@ -241,15 +176,11 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     workers = [Worker(f"worker-{i}", bus) for i in range(NUM_WORKERS)]
     events_mod = sys.modules["app.websocket.events"]
 
-    # --- Connect a production-shaped fleet of clients -------------------
     anon_clients: list[FakeWebSocket] = []
     for w in workers:
         for i in range(ANON_CLIENTS_PER_WORKER):
             anon_clients.append(w.connect_client(f"anon-{i}"))
 
-    # Shared users: each has a tab open on two DIFFERENT workers, the
-    # scenario that specifically exercises broadcast_to_user()'s relay
-    # path (bug #1 in the module docstring).
     user_clients: dict[str, list[FakeWebSocket]] = defaultdict(list)
     for u in range(NUM_SHARED_USERS):
         uid = f"user-{u}"
@@ -263,10 +194,7 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
 
     publish_times: dict[str, float] = {}
     publish_lock = threading.Lock()
-    # Informational only during the chaotic flood (see the deterministic
-    # settle phase below for the actual convergence assertion) - concurrent
-    # writers racing on the same station during the flood have no defined
-    # winner, so this bookkeeping isn't used to assert anything by itself.
+
     final_value_per_station: dict[int, str] = {}
     final_lock = threading.Lock()
 
@@ -274,9 +202,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
         with publish_lock:
             publish_times[seq_key] = time.monotonic()
 
-    # --- "Leader" simulator: periodic async broadcast() ticks from one
-    # worker's event loop, exactly like the real train/crowd simulator
-    # background tasks, running concurrently with the flood above. ---
     leader = workers[0]
     tick_stop = threading.Event()
     tick_count = {"n": 0}
@@ -296,8 +221,7 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=PUBLISHER_THREADS) as pool:
         futures = []
-        # Interleave many concurrent instances of each publisher kind,
-        # like real overlapping request handlers - not one-thread-per-kind.
+
         chunks = []
         for i in range(0, STATION_ALERT_EVENTS, 60):
             chunks.append(("alert", i))
@@ -357,16 +281,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
           f"concurrently across {PUBLISHER_THREADS} publisher threads and {NUM_WORKERS} "
           f"workers in {fire_duration:.2f}s.")
 
-    # Let everything drain: coalesce windows flush, relay threads deliver,
-    # asyncio.gather sends complete. This test harness runs all simulated
-    # worker event loops as THREADS inside one Python process (real
-    # production workers are separate OS processes, each with their own
-    # GIL/core) - so under this synthetic load, GIL contention across N
-    # event-loop threads + M publisher threads can itself inflate queueing
-    # delay independent of anything in manager.py. To avoid mistaking that
-    # harness artifact for a real "missed event" bug, poll for actual
-    # quiescence (received counts stop growing) instead of a fixed sleep,
-    # with a generous ceiling.
     def total_received():
         return sum(len(ws.received) for ws in all_clients)
 
@@ -391,9 +305,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     print(f"Drained for {drain_elapsed:.1f}s until delivery counts quiesced "
           f"({total_received()} total messages received across all clients).")
 
-    # ------------------------------------------------------------------
-    # Analysis
-    # ------------------------------------------------------------------
     print("\n=== Analysis ===")
 
     def parse_client(ws: FakeWebSocket):
@@ -406,7 +317,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
             out.append((obj, t))
         return out
 
-    # --- 1. Duplicate / missed check: station_alert (broadcast to everyone) ---
     expected_alert_seqs = {f"alert-{i}" for i in range(STATION_ALERT_EVENTS)}
     dup_count = 0
     missed_count = 0
@@ -445,15 +355,7 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     if alert_latencies:
         p50 = statistics.median(alert_latencies)
         p95 = statistics.quantiles(alert_latencies, n=20)[18] if len(alert_latencies) >= 20 else max(alert_latencies)
-        # Informational, not a hard check, at this specific load level: this
-        # harness simulates NUM_WORKERS OS processes as threads sharing ONE
-        # Python GIL (unavoidable - no network access in this sandbox to run
-        # real separate worker processes/Redis), so absolute latency here is
-        # bounded by this process's single-core scheduling capacity, not by
-        # manager.py. See the LIGHT-LOAD CONTROL RUN section below, which
-        # runs the identical code path at a throughput a single real worker
-        # process can plausibly sustain, and is where the real latency
-        # threshold is asserted.
+
         print(f"  station_alert latency [{label}]: p50={p50*1000:.1f}ms p95={p95*1000:.1f}ms "
               f"max={max_alert_latency*1000:.1f}ms"
               + ("" if assert_latency else " (informational only at this simulated scale - see light-load control run)"))
@@ -462,7 +364,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
                   f"delay threshold under concurrent {PUBLISHER_THREADS}-thread load",
                   max_alert_latency <= LATENCY_WARN_SECONDS)
 
-    # --- 2. Duplicate / missed / cross-user-leak check: notification (targeted) ---
     dup_count = 0
     missed_count = 0
     leak_count = 0
@@ -470,12 +371,9 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     max_notif_latency = 0.0
     for uid, tabs in user_clients.items():
         pass
-    # Build seq -> intended user map from publish order is not tracked, so
-    # instead verify per-tab: every seq that ANY of a user's tabs received,
-    # BOTH of that user's tabs received exactly once, and no OTHER user's
-    # tabs received it at all.
-    seq_owner: dict[str, set[str]] = defaultdict(set)  # seq -> set of uids that received it
-    seq_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # seq -> uid -> total receipts across that uid's tabs
+
+    seq_owner: dict[str, set[str]] = defaultdict(set)  
+    seq_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  
     for uid, tabs in user_clients.items():
         for ws in tabs:
             for obj, t in parse_client(ws):
@@ -518,20 +416,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
             check(f"[{label}] notification: no delivery exceeded the {LATENCY_WARN_SECONDS*1000:.0f}ms threshold",
                   max_notif_latency <= LATENCY_WARN_SECONDS)
 
-    # --- 3. Coalesced crowd_update: eventual convergence + resync-on-connect ---
-    # NOTE: during the chaotic flood above, multiple DIFFERENT workers can
-    # race to update the SAME station concurrently, each independently
-    # coalescing only its own local buffer. The design has no global
-    # ordering/vector-clock across workers for that case (nothing in
-    # app/websocket/manager.py claims one), so "which concurrent write
-    # wins" is genuinely undefined during the flood itself - that's not a
-    # duplicate/missed/delayed bug, it's inherent to last-write-wins
-    # eventual consistency with no cross-worker sequencing, and asserting
-    # a specific winner there would be a false positive from the test, not
-    # a real defect. So this check instead adds one final, UNAMBIGUOUS,
-    # serialized update per station (single worker, sent only after the
-    # flood has fully quiesced) and verifies every client - and a late
-    # joiner - converges on that exact value with no ambiguity possible.
     settle_worker = workers[2]
     final_value_per_station: dict[int, str] = {}
     for station in range(NUM_STATIONS):
@@ -541,8 +425,7 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
             "updates": [{"station_id": station, "current_count": 999, "tag": tag}],
             "timestamp": "settle",
         })
-    # Wait for the settle broadcast(s) to actually be delivered cluster-wide
-    # (coalesce window + relay hop) before checking convergence.
+
     def settled(ws):
         return last_seen_value_local(ws, NUM_STATIONS - 1) == final_value_per_station[NUM_STATIONS - 1]
 
@@ -562,14 +445,8 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
 
     wait_until(lambda: all(settled(ws) for ws in random.sample(all_clients, min(10, len(all_clients)))),
                timeout=10.0)
-    time.sleep(0.5)  # let the rest of the cluster catch up too
+    time.sleep(0.5)  
 
-    # Under this scope (dup/missed/delayed), the check for a coalesced,
-    # merge-by-key event stream is: (a) every client's LAST view of each
-    # station matches the true final value once the system quiesces, and
-    # (b) a freshly-connecting client (opened only after the flood ends)
-    # gets caught up to that final state immediately via the resync path,
-    # not after waiting for another tick.
     def last_seen_value(ws: FakeWebSocket, station: int):
         last = None
         for obj, t in parse_client(ws):
@@ -607,7 +484,6 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     check(f"[{label}] crowd_update: a client connecting AFTER the flood ends is immediately caught up "
           "to the final state via resync, with no wait for the next tick", resync_ok)
 
-    # --- 4. Leader tick stream: no duplicates/misses despite overlapping load ---
     dup_count = 0
     missed_count = 0
     expected_ticks = {f"tick-{i}" for i in range(tick_count["n"])}
@@ -621,8 +497,7 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
                 if seq:
                     seen[seq] += 1
         dups = {k: v for k, v in seen.items() if v > 1}
-        # A client connected before the ticks started should see every tick
-        # that happened while it was connected (all of them, here).
+
         missing = expected_ticks - set(seen.keys())
         if dups:
             dup_count += sum(v - 1 for v in dups.values())
@@ -636,19 +511,10 @@ def main(num_workers=NUM_WORKERS, anon_per_worker=ANON_CLIENTS_PER_WORKER,
     for w in workers:
         w.stop()
 
-
 if __name__ == "__main__":
-    # Phase 1: heavy multi-worker stress - many workers, many clients, a
-    # concurrent flood. Correctness (duplicate/missed/convergence) is
-    # asserted here; raw latency is informational only (see the module
-    # docstring / inline notes above on why absolute latency isn't a valid
-    # signal at this specific simulated scale).
+
     main(assert_latency=False, label="heavy (correctness under stress)")
 
-    # Phase 2: a lighter, throughput-proportional control run - same code
-    # path, same cross-worker relay, at a volume-per-thread ratio one real
-    # OS process could plausibly sustain. This is where the actual delivery
-    # latency SLA is meaningfully checked.
     main(num_workers=3, anon_per_worker=8, num_shared_users=10,
          station_alert_events=120, notification_events=80, crowd_update_bursts=80,
          publisher_threads=8, assert_latency=True, label="light (latency SLA control)")

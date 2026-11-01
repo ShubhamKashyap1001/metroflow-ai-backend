@@ -1,23 +1,3 @@
-"""One-off migration for the new `notification_dispatch_jobs` table
-(the durable dispatch queue - see
-app/models/notification_dispatch_job.py and
-app/services/notification_dispatch_queue.py).
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet. That means create_all *would* pick this table up automatically on
-a fresh database, but for an existing deployment (one where init_db.py
-already ran before this update) that table simply won't exist until
-something calls create_all again. Run this once to create it without
-touching any other table:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_notification_dispatch_jobs
-
-Safe to run more than once - create_all only creates a table if it's
-missing.
-"""
 from app.core.config import settings
 from app.database.base import Base
 from app.database.database import engine

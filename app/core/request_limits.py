@@ -1,48 +1,11 @@
-"""Request/upload size protection for Render Free 512MB.
-
-FastAPI/Starlette impose NO limit on incoming HTTP request body size by
-default - a client (malicious or just a buggy retry loop) can send an
-arbitrarily large body and Starlette will happily buffer the whole
-thing in memory before FastAPI ever gets to validate it against a
-Pydantic model, which is more than enough to OOM a 512MB instance from
-a single request.
-
-This is a plain ASGI middleware (no new dependency - Starlette/FastAPI
-are already in requirements.txt and this only uses their public ASGI
-types), deliberately NOT a `@app.middleware("http")`/
-`BaseHTTPMiddleware` one: BaseHTTPMiddleware works by fully awaiting a
-`StreamingResponse`-like wrapper around the downstream app, which does
-not give a hard guarantee about the request body never being consumed
-by the framework before this layer gets a chance to reject it. A raw
-ASGI middleware that wraps `receive` directly is the only reliable way
-to guarantee rejection happens before the oversized remainder of a
-body is ever read off the socket into memory.
-
-Two layers, cheapest first:
-  1. `Content-Length` header check - rejects with ZERO bytes read from
-     the socket whenever the client declares a size up front (true for
-     every normal JSON POST/PUT/PATCH this API receives).
-  2. Streaming byte-count check - covers chunked transfer-encoding (no
-     Content-Length) or a client that lies about it. Each chunk is
-     counted as it arrives; the instant the running total exceeds the
-     limit, the connection is aborted - the oversized rest of the body
-     is never buffered or handed to the app.
-
-Only wraps `scope["type"] == "http"` - WebSocket connections and the
-ASGI lifespan scope pass straight through untouched, so this has no
-effect on `/ws/monitor` or its message protocol.
-"""
 import logging
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
-
 class PayloadTooLarge(Exception):
-    """Raised internally once the streamed body exceeds the configured
-    limit - never escapes this module."""
-
+    pass
 
 class MaxBodySizeMiddleware:
     def __init__(self, app: ASGIApp, max_body_size: int) -> None:
@@ -106,11 +69,7 @@ class MaxBodySizeMiddleware:
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
-                # Force the connection closed instead of trying to
-                # keep it alive for a next request - part or all of
-                # the oversized body may still be unread on the wire,
-                # and reusing the connection without draining it would
-                # desync the next request on it.
+
                 (b"connection", b"close"),
             ],
         })

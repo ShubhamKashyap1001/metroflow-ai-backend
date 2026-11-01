@@ -1,8 +1,3 @@
-"""WebSocket reconnect state-resync verification: reconnect must get
-the LAST KNOWN state
-immediately, with no new broadcast needed, then keep receiving live
-ticks - real manager.py + real /ws/monitor route body, real
-fastapi/starlette/websockets stack."""
 import asyncio
 import json
 import sys
@@ -31,19 +26,16 @@ async def websocket_monitor(websocket: WebSocket):
     finally:
         manager.disconnect(websocket)
 
-
 results = []
 def check(label, cond):
     results.append((label, bool(cond)))
     print(f"{'PASS' if cond else 'FAIL'} - {label}")
-
 
 async def broadcast_crowd(updates, ts="t"):
     await manager.broadcast(events.CROWD_UPDATE, {"updates": updates, "timestamp": ts})
 
 async def broadcast_train(updates, ts="t"):
     await manager.broadcast(events.TRAIN_POSITION, {"updates": updates, "timestamp": ts})
-
 
 def main():
     manager.bind_loop(asyncio.get_event_loop())
@@ -63,8 +55,6 @@ def main():
         check("client got crowd tick", m1["data"]["timestamp"] == "tick-A")
         check("client got train tick", m2["data"]["timestamp"] == "tick-A")
 
-        # A single check-in style PARTIAL update for just station 1
-        # (mirrors crowd_service's request-triggered coalesced notify()).
         asyncio.run(broadcast_crowd([
             {"station_id": 1, "crowd_level": "critical", "current_count": 610},
         ], ts="tick-B-partial"))
@@ -108,7 +98,6 @@ def main():
         print(f"\n{len(failed)} check(s) FAILED")
         sys.exit(1)
     print(f"\nAll {len(results)} checks PASSED")
-
 
 if __name__ == "__main__":
     main()

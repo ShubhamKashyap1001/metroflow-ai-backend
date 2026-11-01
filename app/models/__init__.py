@@ -14,10 +14,15 @@ from app.models.station_crowd_state import StationCrowdState
 from app.models.crowd_log_hourly import CrowdLogHourly
 from app.models.prediction import Prediction
 from app.models.alert import Alert
+from app.models.alert_incident_event import AlertIncidentEvent
+from app.models.crowd_response_action import CrowdResponseAction
 from app.models.ai_model import AIModel
 from app.models.notification_log import NotificationLog
 from app.models.notification import Notification
+from app.models.notification_preference import NotificationPreference
 from app.models.notification_read_state import NotificationReadState
 from app.models.notification_dispatch_job import NotificationDispatchJob
 from app.models.enquiry import Enquiry
 from app.models.news import News
+from app.models.report_schedule import ReportSchedule
+from app.models.sensor_feed_event import SensorFeedEvent

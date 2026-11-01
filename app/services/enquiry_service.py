@@ -13,14 +13,6 @@ from app.models.user_profile import UserProfile
 from app.schemas.enquiry import EnquiryCreate, EnquiryResolve
 from app.services import notification_service
 
-# BUGFIX (expensive analytics/user/enquiry queries): list_enquiries ran
-# `.all()` with no limit/offset - the admin "manage enquiries" queue
-# (no filter, every enquiry ever raised) and the passenger's "My
-# Enquiries" list both pulled every matching row into memory and
-# serialized it as one JSON response, growing unbounded over time. Same
-# DEFAULT_*_LIMIT/MAX_*_LIMIT + hard-clamped offset/limit shape already
-# used for alerts/notifications/predictions (Phase 9), schedules
-# (schedule_service.py), and users (app/api/v1/users.py).
 DEFAULT_ENQUIRIES_LIMIT = 100
 MAX_ENQUIRIES_LIMIT = 500
 
@@ -36,11 +28,6 @@ def list_enquiries(
     limit: int = DEFAULT_ENQUIRIES_LIMIT,
     offset: int = 0,
 ) -> list[Enquiry]:
-    """Admins/operators see every enquiry (the "manage enquiries"
-    queue). Passengers only ever see their own - this is what powers
-    the passenger's "My Enquiries" list, and also guards
-    get_enquiry() below against a passenger guessing another user's
-    enquiry id."""
     limit = _clamp(limit, DEFAULT_ENQUIRIES_LIMIT, MAX_ENQUIRIES_LIMIT)
     offset = max(offset or 0, 0)
 
@@ -108,7 +95,6 @@ def resolve_enquiry(
     )
 
     return enquiry
-
 
 def get_enquiry_stats(db: Session, current_user: UserProfile) -> dict:
     query = db.query(Enquiry.status, func.count(Enquiry.id))

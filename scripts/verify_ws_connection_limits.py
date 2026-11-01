@@ -1,43 +1,4 @@
 #!/usr/bin/env python3
-"""Stdlib-only verification harness for the WebSocket connection-cap
-change to app/websocket/manager.py (WS_MAX_CONNECTIONS /
-WS_MAX_CONNECTIONS_PER_USER - see ConnectionManager.connect()/_reject()).
-
-Why this exists instead of a real pytest run against app/main.py's
-/ws/monitor route: this sandbox has no network access, so `fastapi`
-and `redis` (both already pinned in requirements.txt) cannot be
-installed here - the same, recurring environment constraint documented
-in scripts/verify_ws_manager.py. This script reuses that exact
-technique: it imports the REAL app/websocket/manager.py module
-unmodified, by injecting minimal fake `fastapi` and `app.core.cache`
-modules into sys.modules first, so every check below exercises the
-actual shipped ConnectionManager.connect()/_reject()/broadcast() code,
-not a re-implementation of it.
-
-What this verifies, against the real code:
-  1. A connection below the configured limit is accepted (added to
-     active_connections, websocket.accept() called).
-  2. A connection at/above the configured limit is rejected cleanly:
-     websocket.accept() is never called, websocket.close() IS called
-     with WS close code 1013 ("try again later"), and connect()
-     returns False.
-  3. A rejected connection is never stored in active_connections (or
-     any of the manager's other per-connection dicts).
-  4. Already-connected clients are completely unaffected by a
-     rejection - their own connections/state are untouched.
-  5. A per-user sub-limit rejects a single user's connections once
-     that user is at MAX_CONNECTIONS_PER_USER, without affecting the
-     global limit or other users.
-  6. A client that disconnects (server calls manager.disconnect()) is
-     removed from active_connections, freeing a slot for a new
-     connection.
-  7. A failed send (dead peer) is detected and removed by broadcast().
-  8. broadcast() still reaches every valid connected client.
-  9. A single broadcast()'s fan-out (the asyncio.gather over
-     active_connections) is bounded by MAX_CONNECTIONS - i.e. it can
-     never exceed the connection cap, so it can't create an unbounded
-     number of concurrent send tasks.
-"""
 import asyncio
 import sys
 import threading
@@ -48,17 +9,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-# ---------------------------------------------------------------------------
-# Fake `fastapi` module - same minimal stand-in as verify_ws_manager.py, with
-# `close()` added since _reject() now needs it.
-# ---------------------------------------------------------------------------
 fake_fastapi = types.ModuleType("fastapi")
-
 
 class FakeWebSocket:
     def __init__(self, name: str, fail_mode: str | None = None):
         self.name = name
-        self.fail_mode = fail_mode  # None | "raise" | "hang"
+        self.fail_mode = fail_mode  
         self.sent: list[str] = []
         self.accepted = False
         self.closed_with: tuple[int, str] | None = None
@@ -76,7 +32,6 @@ class FakeWebSocket:
             await asyncio.sleep(999)
         self.sent.append(payload)
 
-
 fake_fastapi.WebSocket = FakeWebSocket
 sys.modules["fastapi"] = fake_fastapi
 
@@ -87,22 +42,13 @@ core_pkg.__path__ = []
 sys.modules.setdefault("app", app_pkg)
 sys.modules.setdefault("app.core", core_pkg)
 
-
 def make_fake_cache_module():
-    # No relay under test here - Redis unreachable is fine, manager.py
-    # degrades to local-only delivery, which is all these checks need.
+
     mod = types.ModuleType("app.core.cache")
     mod.get_client = lambda: None
     return mod
 
-
 def fresh_manager_module(max_connections: int, max_per_user: int):
-    """Re-imports app.websocket.manager fresh, with app.core.config
-    UNAVAILABLE (so manager.py takes its except-ImportError fallback
-    path and reads WS_MAX_CONNECTIONS/WS_MAX_CONNECTIONS_PER_USER from
-    plain env vars instead - see manager.py's module-level try/except).
-    This also confirms the module stays importable in this offline
-    harness exactly like before this change."""
     import os
 
     for name in (
@@ -122,7 +68,6 @@ def fresh_manager_module(max_connections: int, max_per_user: int):
     import importlib
     return importlib.import_module("app.websocket.manager")
 
-
 class LoopThread:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
@@ -136,18 +81,12 @@ class LoopThread:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2)
 
-
 results = []
-
 
 def check(label, condition):
     results.append((label, bool(condition)))
     print(f"{'PASS' if condition else 'FAIL'} - {label}")
 
-
-# ---------------------------------------------------------------------------
-# Tests 1-4: global connection cap.
-# ---------------------------------------------------------------------------
 def test_global_connection_cap():
     print("\n=== Test 1-4: global WS_MAX_CONNECTIONS cap ===")
     mgr_mod = fresh_manager_module(max_connections=3, max_per_user=10)
@@ -171,7 +110,6 @@ def test_global_connection_cap():
           len(manager.active_connections) == 3
           and all(w in manager.active_connections for w in (ws1, ws2, ws3)))
 
-    # 4th connection is AT the limit - must be rejected cleanly.
     ok4 = lt.run(manager.connect(ws4))
     check("a connection at/above the limit is rejected (connect() -> False)",
           ok4 is False)
@@ -187,7 +125,6 @@ def test_global_connection_cap():
           len(manager.active_connections) == 3
           and all(w in manager.active_connections for w in (ws1, ws2, ws3)))
 
-    # Disconnecting one frees a slot for a new connection.
     manager.disconnect(ws2, reason="client_close")
     check("disconnected client removed from active_connections",
           ws2 not in manager.active_connections and len(manager.active_connections) == 2)
@@ -197,10 +134,6 @@ def test_global_connection_cap():
 
     lt.stop()
 
-
-# ---------------------------------------------------------------------------
-# Test 5: per-user sub-limit.
-# ---------------------------------------------------------------------------
 def test_per_user_cap():
     print("\n=== Test 5: WS_MAX_CONNECTIONS_PER_USER sub-limit ===")
     mgr_mod = fresh_manager_module(max_connections=50, max_per_user=2)
@@ -230,10 +163,6 @@ def test_per_user_cap():
 
     lt.stop()
 
-
-# ---------------------------------------------------------------------------
-# Tests 6-9: broadcast bounding + dead-connection cleanup, on top of the cap.
-# ---------------------------------------------------------------------------
 def test_broadcast_bounded_and_dead_connection_cleanup():
     print("\n=== Test 6-9: broadcast fan-out bounding + dead-connection cleanup ===")
     mgr_mod = fresh_manager_module(max_connections=5, max_per_user=10)
@@ -256,10 +185,6 @@ def test_broadcast_bounded_and_dead_connection_cleanup():
     check("healthy connections remain tracked after the dead one was reaped",
           all(ws in manager.active_connections for ws in healthy))
 
-    # Fan-out bound: active_connections (and therefore the number of
-    # concurrent _send_one tasks a single broadcast() gather() creates)
-    # can never exceed MAX_CONNECTIONS, since connect() itself refuses
-    # to grow past it.
     at_capacity = list(healthy)
     while len(manager.active_connections) < mgr_mod.MAX_CONNECTIONS:
         ws = FakeWebSocket(f"filler{len(manager.active_connections)}")
@@ -275,7 +200,6 @@ def test_broadcast_bounded_and_dead_connection_cleanup():
           and overflow_ok is False)
 
     lt.stop()
-
 
 if __name__ == "__main__":
     test_global_connection_cap()

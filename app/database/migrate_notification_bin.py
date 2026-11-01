@@ -1,21 +1,3 @@
-"""One-off migration for the new Notification.binned_at column (the
-notification Bin feature - see app/models/notification.py's module
-docstring and app/services/notification_service.py::mark_all_read).
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never alters an existing one. If your `notifications` table
-already exists (i.e. you ran init_db.py before this update), run this
-once to add the new column (+ its index) without losing existing data:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_notification_bin
-
-Safe to run more than once - every statement is IF NOT EXISTS.
-Existing rows get binned_at = NULL, which means "not binned - still in
-the Inbox", i.e. behaviourally identical to before this migration.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

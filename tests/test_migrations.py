@@ -12,7 +12,6 @@ from app.models import *  # noqa: F401,F403
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
 @pytest.fixture
 def alembic_config(tmp_path):
     db_path = tmp_path / "migration_test.db"
@@ -23,56 +22,34 @@ def alembic_config(tmp_path):
     cfg.attributes["configure_logger"] = False
     return cfg, db_url
 
-
 def test_single_linear_head_revision_no_branching(alembic_config):
-    """Deterministic & ordered: exactly one head, no ambiguous branch
-    Alembic could apply out of order."""
     cfg, _ = alembic_config
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1
 
-
 def test_upgrade_head_on_fresh_database_creates_expected_tables(alembic_config):
-    """Fresh database (no tables, no alembic_version yet): running the
-    migration once creates the full current schema in one step."""
     cfg, db_url = alembic_config
     command.upgrade(cfg, "head")
 
     engine = create_engine(db_url)
     tables = set(inspect(engine).get_table_names())
-    for expected in ("stations", "journeys", "trains", "predictions", "alembic_version"):
+    for expected in ("stations", "journeys", "trains", "predictions", "report_schedules", "alembic_version"):
         assert expected in tables
 
-
 def test_upgrade_head_is_idempotent_and_records_current_revision(alembic_config):
-    """Running the exact same migration twice in a row (e.g. a
-    redeployment re-running `alembic upgrade head`) must not error and
-    must leave the database on the same, single, correctly recorded
-    revision."""
     cfg, db_url = alembic_config
     command.upgrade(cfg, "head")
-    command.upgrade(cfg, "head")  # must not raise
+    command.upgrade(cfg, "head")  
 
     engine = create_engine(db_url)
     with engine.connect() as conn:
         current = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
-    assert current == [("0001_baseline_schema",)]
-
+    assert current == [("0006_reports_and_freshness",)]
 
 def test_upgrade_head_does_not_touch_pre_existing_data(alembic_config):
-    """The critical production-safety case: a database that already
-    has these tables (e.g. created by the old
-    Base.metadata.create_all()-only flow, or by a previous
-    `alembic upgrade head`) and already has real rows in it must come
-    through `alembic upgrade head` with that data completely intact -
-    no table recreated, no row dropped."""
     cfg, db_url = alembic_config
 
-    # Simulate a pre-existing production database: tables already
-    # created (as init_db.py's create_tables() would do), with a real
-    # row already in it, and NO alembic_version table yet - i.e. this
-    # database predates the migration process entirely.
     engine = create_engine(db_url)
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
@@ -93,11 +70,10 @@ def test_upgrade_head_does_not_touch_pre_existing_data(alembic_config):
         ).fetchall()
     assert alembic_version_exists == []
 
-    # Bring this "production" database under Alembic for the first time.
     command.upgrade(cfg, "head")
 
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT station_code FROM stations")).fetchall()
         version = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
     assert rows == [("PROD1",)]
-    assert version == [("0001_baseline_schema",)]
+    assert version == [("0006_reports_and_freshness",)]

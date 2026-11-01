@@ -5,10 +5,7 @@ import pytest
 
 from app.simulator import csv_replay_simulator, train_simulator
 
-
 class _FakeCache:
-    """Records every delete() call; get/set are no-ops (always a miss)
-    since these tests only care about invalidation on write."""
 
     def __init__(self):
         self.deleted: list[str] = []
@@ -22,7 +19,6 @@ class _FakeCache:
     def set_json(self, key, value, ttl_seconds=None):
         pass
 
-
 @pytest.fixture
 def fake_cache(monkeypatch):
     fake = _FakeCache()
@@ -30,16 +26,7 @@ def fake_cache(monkeypatch):
     monkeypatch.setattr(train_simulator, "cache", fake)
     return fake
 
-
-# --- csv_replay_simulator._tick_sync -----------------------------------
-
 def test_crowd_tick_invalidates_dashboard_and_per_station_cache(fake_cache):
-    """A tick that produced updates for stations in Delhi and Mumbai
-    must drop crowd:dashboard:all, both affected state views, both
-    affected city views, and each touched station's crowd:latest entry
-    - the exact keys crowd_service.invalidate_station_cache() already
-    drops for a request-triggered write, now reached from the tick
-    loop's own bulk write instead."""
     updates = [
         {"station_id": 1, "station_code": "STN-DEL-01", "station_name": "A",
          "current_count": 10, "crowd_level": "Low", "source_timestamp": "t"},
@@ -71,11 +58,7 @@ def test_crowd_tick_invalidates_dashboard_and_per_station_cache(fake_cache):
     assert "crowd:dashboard:Maharashtra" in fake_cache.deleted
     assert "crowd:dashboard:Mumbai" in fake_cache.deleted
 
-
 def test_tick_sync_actually_invalidates_on_real_updates(fake_cache, monkeypatch):
-    """End-to-end through _tick_sync itself (not just the extracted
-    logic above): a tick that writes station rows and commits must
-    result in cache.delete("crowd:dashboard:all") having been called."""
     monkeypatch.setattr(csv_replay_simulator, "_load_csv_once", lambda: None)
     monkeypatch.setattr(csv_replay_simulator, "_rows_by_station", {"STN-DEL-01": object()})
     monkeypatch.setattr(
@@ -102,16 +85,12 @@ def test_tick_sync_actually_invalidates_on_real_updates(fake_cache, monkeypatch)
     assert "crowd:latest:1" in fake_cache.deleted
     assert "crowd:dashboard:Delhi" in fake_cache.deleted
 
-
-# --- train_simulator._invalidate_train_position_cache / _track_tick_sync ---
-
 def test_invalidate_train_position_cache_drops_all_and_every_state(fake_cache):
     train_simulator._invalidate_train_position_cache()
 
     assert "train:positions:all" in fake_cache.deleted
     for state in train_simulator.STATE_CITY_MAP:
         assert f"train:positions:{state}" in fake_cache.deleted
-
 
 def test_track_tick_sync_invalidates_cache_when_updates_produced(fake_cache, monkeypatch):
     train = MagicMock(id=1, train_number="T-1", is_active=True)

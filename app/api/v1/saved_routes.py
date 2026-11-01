@@ -18,7 +18,6 @@ router = APIRouter(
     tags=["Saved Routes"],
 )
 
-
 def _to_response(route) -> SavedRouteResponse:
     return SavedRouteResponse(
         id=route.id,
@@ -28,7 +27,6 @@ def _to_response(route) -> SavedRouteResponse:
         destination_station_name=route.destination_station.station_name if route.destination_station else "",
     )
 
-
 @router.get("/me", response_model=SavedRouteResponse | None)
 def get_my_saved_route(
     db: Session = Depends(get_db),
@@ -36,7 +34,6 @@ def get_my_saved_route(
 ):
     route = saved_route_service.get_my_route(db, str(current_user.id))
     return _to_response(route) if route else None
-
 
 @router.put("/me", response_model=SavedRouteResponse)
 @limiter.limit(WRITE_LIMIT)
@@ -54,7 +51,6 @@ def set_my_saved_route(
     )
     return _to_response(route)
 
-
 @router.delete("/me", status_code=204)
 @limiter.limit(WRITE_LIMIT)
 def delete_my_saved_route(
@@ -63,7 +59,6 @@ def delete_my_saved_route(
     current_user: UserProfile = Depends(get_current_user),
 ):
     saved_route_service.delete_my_route(db, str(current_user.id))
-
 
 @router.get("/me/live", response_model=SavedRouteLiveStatus)
 def get_my_saved_route_live(

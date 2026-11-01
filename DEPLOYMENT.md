@@ -48,6 +48,35 @@ curl http://localhost:8000/healthz   # should return {"status":"ok"}
    deploys after GitHub Actions' tests pass, instead of on every push
    regardless of test result.
 
+### Reporting, freshness checks, and access
+
+- Apply database changes with `alembic upgrade head` before deploying
+  the new application image. The included `0006_reports_and_freshness`
+  migration creates the recurring report schedule table without
+  modifying existing incident or ridership records.
+- Scheduled reports require working SMTP settings:
+  `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+  `SMTP_FROM_EMAIL`, and `SMTP_USE_TLS`. A schedule can only deliver
+  to the signed-in operator/admin's account email; it does not accept
+  arbitrary recipient addresses.
+- `ENABLE_REPORT_SCHEDULER=True` enables scheduled delivery.
+  `REPORT_SCHEDULER_INTERVAL_SECONDS` controls due-job polling and
+  `CROWD_DATA_STALE_AFTER_SECONDS` controls the stale-data threshold.
+  The job uses the same leader election as other background loops, so
+  only one worker/replica processes due schedules at a time.
+- Scheduled delivery times are in UTC. SMTP credentials must be
+  configured in the hosting provider's secret environment settings,
+  not committed to `.env` files.
+- Transient delivery failures retry up to three times by default, with
+  five-minute spacing. `REPORT_SCHEDULE_MAX_ATTEMPTS` and
+  `REPORT_SCHEDULE_RETRY_SECONDS` adjust this behavior. A delivery that
+  remains in progress for 30 minutes is marked failed and retried when
+  attempts remain; SMTP itself cannot provide exactly-once delivery if
+  a worker crashes after the provider accepts a message.
+- Reports, trend comparisons, freshness details, and report scheduling
+  are restricted to admin/operator accounts. Alert incident history
+  remains available to those same operational roles.
+
 **Render free-tier facts:** the free Postgres expires 30 days after
 creation (re-seed after recreating it); the free web service sleeps
 after 15 minutes idle and takes ~50s to wake on the next request.
@@ -115,6 +144,20 @@ either way.
       `CORS_ORIGINS` includes the exact frontend URL
 
 ## 7. Milestone 4 mapping
+
+## 8. Staging smoke checks
+
+Use a staging URL and an admin or operator access token. The script only makes read requests.
+
+```powershell
+$env:SMOKE_TEST_BASE_URL = "https://staging-api.example.com"
+$env:SMOKE_TEST_ACCESS_TOKEN = "<staging-access-token>"
+python scripts/smoke_test_staging.py
+```
+
+The command exits with status 0 only when health, authentication, station, live train, crowd, notification, traffic report, and admin-control endpoints all respond successfully.
+
+## 9. Milestone 4 mapping
 
 | Spec item | Status |
 |---|---|

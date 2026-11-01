@@ -1,9 +1,3 @@
-"""News & Announcements module. Admins/operators publish "latest
-news" items (service updates, general announcements); every
-authenticated user (passenger included) reads the published feed.
-Separate from the Alert module (station-scoped, email/SMS-dispatched
-incident alerts) - this is lightweight, unscoped announcements.
-"""
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -28,9 +22,6 @@ def get_news_feed(
     db: Session = Depends(get_db),
     current_user: UserProfile = Depends(get_current_user),
 ):
-    """`limit`/`offset` page through results, most recent first (default
-    page size and hard cap enforced in news_service.list_news, so an
-    out-of-range value here is clamped rather than rejected)."""
     if include_inactive and current_user.role not in (UserRole.ADMIN, UserRole.OPERATOR):
         include_inactive = False
     return news_service.list_news(db, include_inactive, limit, offset)

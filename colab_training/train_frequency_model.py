@@ -1,25 +1,3 @@
-"""Milestone 2 - AI Prediction Module: train-frequency recommendation
-model training.
-
-Learns a recommended headway (minutes between trains) as an inverse
-function of predicted demand: busier station/hour slots -> shorter
-recommended frequency. Trained on the REAL 2nd-generation crowd table
-(see _real_dataset_builder.py) with a derived target so it can be
-swapped for a real optimizer later without changing the calling code.
-
-Trains BOTH RandomForest and XGBoost candidates and picks whichever had
-the lower held-out MAE (see `train()` below) - but the saved
-production bundle stores ONLY that winning estimator (`model` +
-`model_name`), not the losing candidate, to keep the shipped .pkl and
-its in-memory footprint down to a single trained model.
-
-Standalone script - meant to be run in Google Colab (see
-train_metroflow_models_colab.ipynb in this same folder), or locally
-with `python colab_training/train_frequency_model.py` from the backend repo root if you
-prefer. It has NO dependency on the `app` package - it never runs as
-part of `uvicorn app.main:app`, so it never costs you CPU just from
-running the backend.
-"""
 import os
 
 import joblib
@@ -72,8 +50,7 @@ def train() -> dict:
     best_mae = results[best_name]["mae"]
 
     os.makedirs(MODEL_DIR, exist_ok=True)
-    # Bundle keeps both fitted candidates under 'models' - see
-    # train_crowd_model.py's train() for why.
+
     joblib.dump({
         "model": best_model,
         "features": FEATURES,

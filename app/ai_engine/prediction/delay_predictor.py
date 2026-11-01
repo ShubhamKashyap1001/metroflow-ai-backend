@@ -17,11 +17,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
 
-# Every raw input name this predictor knows how to compute a value for
-# (see the `row_values` mapping built in predict_delay() below - this
-# is exactly its key set). Used to validate a loaded bundle's
-# `features` list before trusting its column order (see
-# model_bundle.validate_feature_contract).
 KNOWN_FEATURES = {
     "station_id", "station_code", "hour", "day_of_week", "is_weekend",
     "is_peak_hour", "passenger_count", "capacity_passengers",
@@ -38,11 +33,6 @@ _fleet_stats_local: tuple[float, float] | None = None
 _fleet_stats_local_at: float = 0.0
 
 def _compute_fleet_stats(db: Session) -> tuple[float, float]:
-    """Single query for both capacity and commissioned_date across
-    every active train (was two separate `.all()` queries before this
-    fix), returning (avg_capacity, avg_age_days). Falls back to the
-    same defaults the old per-metric functions used if there's no
-    active-train data at all."""
     rows = (
         db.query(Train.capacity, Train.commissioned_date)
         .filter(Train.is_active.is_(True))
@@ -84,24 +74,12 @@ def _fleet_stats(db: Session) -> tuple[float, float]:
     return stats
 
 def invalidate_fleet_stats_cache() -> None:
-    """Drop the cached fleet-wide (avg_capacity, avg_age_days) pair.
-
-    Called after a train is created/updated (see
-    train_service.create_train/update_train) so a capacity/
-    commissioned_date change - or a brand new train - is reflected in
-    the next delay prediction that falls back to the fleet average,
-    instead of waiting out the rest of FLEET_STATS_CACHE_TTL_SECONDS.
-    Same "clear both layers" shape as train_tracking.py's
-    invalidate_route_cache()."""
     global _fleet_stats_local, _fleet_stats_local_at
     cache.delete(_FLEET_STATS_CACHE_KEY)
     _fleet_stats_local = None
     _fleet_stats_local_at = 0.0
 
 def _real_capacity_passengers(db: Session | None, train_id: int | None) -> float:
-    """Real Train.capacity - this train's own if we know which train,
-    otherwise the real average across active trains (cached - see
-    _fleet_stats above). Never a made-up constant."""
     if db is None:
         return 1200.0                                                  
     if train_id is not None:
@@ -112,11 +90,6 @@ def _real_capacity_passengers(db: Session | None, train_id: int | None) -> float
     return avg_capacity
 
 def _real_train_age_days(db: Session | None, train_id: int | None) -> float:
-    """Real (today - Train.commissioned_date).days for this train, or
-    the real average age across active trains (cached - see
-    _fleet_stats above) if no specific train_id is given. 0.0 only if
-    there's genuinely no commissioned_date data at all (e.g. an older
-    synthetic seed)."""
     if db is None:
         return 0.0
 
@@ -135,12 +108,6 @@ def predict_delay(
     db: Session | None = None,
 ) -> dict:
     dt = target_datetime or datetime.now(timezone.utc)
-    # BUGFIX (naive datetime / timezone handling): same fix as
-    # crowd_predictor.predict_crowd - peak-hour/weekend features are
-    # business-local concepts, so they're derived from `dt` converted
-    # into the app's configured business timezone, not from `dt`'s own
-    # (usually UTC) tzinfo. `dt` itself is unchanged. See
-    # app/utils/timezone.py.
     local_dt = to_business_time(dt)
     hour = local_dt.hour
     day_of_week = local_dt.weekday()
@@ -162,15 +129,7 @@ def predict_delay(
             trained_name = bundle.get("model_name", "random_forest")
             candidates = bundle.get("models") or {trained_name: bundle["model"]}
             train_age_days = _real_train_age_days(db, train_id)
-            # row_values carries every name/unit this bundle's "features"
-            # list might use, since different training runs of this
-            # model have shipped with different naming: some use
-            # "station_id" / "train_age_days", others (e.g. the current
-            # real-data crowd/delay/frequency .pkl set) use "station_code"
-            # / "train_age_years". A plain rename would silently corrupt
-            # the delay prediction for the *_years case (years and days
-            # are on completely different scales), so it's converted
-            # here, not just aliased.
+
             row_values = {
                 "station_id": station_id,
                 "station_code": station_id,
@@ -182,12 +141,7 @@ def predict_delay(
                 "capacity_passengers": _real_capacity_passengers(db, train_id),
                 "train_age_days": train_age_days,
                 "train_age_years": train_age_days / 365.25,
-                # No live weather feed wired up yet, so this defaults to
-                # 0 ("Sunny" in the training encoding - Sunny/Overcast/
-                # Rainy/Stormy = 0/1/2/3), the single most common
-                # category in the training data (~56% of rows). Once a
-                # real weather API/DB column is wired up at inference
-                # time, replace this constant with that live value.
+
                 "weather_code": 0,
             }
                                                                        
@@ -223,7 +177,6 @@ def predict_delay(
         "predicted_delay_minutes": predicted_delay,
         "based_on_predicted_crowd": passenger_count,
         "model_version": model_version,
-        # Per-candidate breakdown (random_forest / xgboost), same
-        # pattern as crowd_predictor.predict_crowd's `models` field.
+
         "models": per_model,
     }

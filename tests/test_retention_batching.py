@@ -10,14 +10,7 @@ from app.utils.db_batch import batched_delete
 import app.simulator.notification_bin_retention as notification_bin_retention
 import app.simulator.retention as retention
 
-
-
 def test_batched_delete_removes_a_large_backlog_in_bounded_batches():
-    """A 12,050-row backlog with batch_size=5000 must come out as 3
-    batches (5000, 5000, 2050) - never one query/delete that tries to
-    handle the whole backlog at once - with a commit after each batch
-    (so no single transaction ever holds locks against more than one
-    batch's worth of rows)."""
     db = MagicMock()
     chain = db.query.return_value.filter.return_value
     chain.limit.return_value.all.side_effect = [
@@ -32,19 +25,14 @@ def test_batched_delete_removes_a_large_backlog_in_bounded_batches():
     )
 
     assert total == 12050
-    # 3 fetches, each bounded to batch_size - never a query with no
-    # LIMIT at all.
+
     assert chain.limit.call_count == 3
     chain.limit.assert_called_with(5000)
     assert chain.delete.call_count == 3
-    # One commit per batch, not one commit for the whole backlog.
+
     assert db.commit.call_count == 3
 
-
 def test_batched_delete_stops_after_final_partial_batch_without_requerying():
-    """The batch that comes back smaller than batch_size is the last
-    one - batched_delete must not issue a 4th (empty) fetch just to
-    confirm there's nothing left."""
     db = MagicMock()
     chain = db.query.return_value.filter.return_value
     chain.limit.return_value.all.side_effect = [
@@ -60,7 +48,6 @@ def test_batched_delete_stops_after_final_partial_batch_without_requerying():
     assert total == 7050
     assert chain.limit.return_value.all.call_count == 2
 
-
 def test_batched_delete_normal_small_dataset_is_a_single_batch():
     db = MagicMock()
     chain = db.query.return_value.filter.return_value
@@ -73,7 +60,6 @@ def test_batched_delete_normal_small_dataset_is_a_single_batch():
 
     assert total == 3
     assert db.commit.call_count == 1
-
 
 def test_batched_delete_nothing_matches_does_nothing():
     db = MagicMock()
@@ -88,8 +74,6 @@ def test_batched_delete_nothing_matches_does_nothing():
     chain.delete.assert_not_called()
     db.commit.assert_not_called()
 
-
-
 def _fake_bucket_row(i):
     return SimpleNamespace(
         station_id=i,
@@ -100,13 +84,7 @@ def _fake_bucket_row(i):
         sample_count=3,
     )
 
-
 def test_rollup_paginates_a_large_bucket_backlog_instead_of_loading_it_all():
-    """A rollup backlog of 1,500 (station, hour) buckets with
-    CROWD_ROLLUP_BATCH_SIZE=1000 must be fetched/upserted as 2 pages
-    (1000, 500), each page committed before the next page is even
-    queried - the aggregate SELECT is never pulled in with a single
-    unbounded `.all()`."""
     db = MagicMock()
     order_by_mock = (
         db.query.return_value.filter.return_value.group_by.return_value.order_by.return_value
@@ -121,19 +99,18 @@ def test_rollup_paginates_a_large_bucket_backlog_instead_of_loading_it_all():
         stats = retention._rollup_and_delete(db)
 
     assert stats["rolled_up_buckets"] == 1500
-    # Two pages upserted (never the whole 1500-row backlog in one go).
+
     assert mock_upsert.call_count == 2
     assert mock_upsert.call_args_list[0].args[1] == page1
     assert mock_upsert.call_args_list[1].args[1] == page2
-    # Bounded LIMIT on every fetch, moving OFFSET, one commit per page.
+
     assert order_by_mock.limit.call_args_list == [((1000,),), ((1000,),)]
     assert order_by_mock.limit.return_value.offset.call_args_list == [
         ((0,),),
         ((1000,),),
     ]
     assert db.commit.call_count == 2
-    # The raw-row delete for the same cutoff also goes through the
-    # shared batching helper, not a bare .delete().
+
     mock_batched_delete.assert_called_once()
     assert mock_batched_delete.call_args.args[1] is retention.CrowdLog
     assert mock_batched_delete.call_args.args[2] is retention.CrowdLog.id
@@ -141,7 +118,6 @@ def test_rollup_paginates_a_large_bucket_backlog_instead_of_loading_it_all():
         mock_batched_delete.call_args.kwargs["batch_size"]
         == retention.settings.RETENTION_BATCH_SIZE
     )
-
 
 def test_rollup_normal_small_backlog_is_a_single_page():
     db = MagicMock()
@@ -159,7 +135,6 @@ def test_rollup_normal_small_backlog_is_a_single_page():
     assert mock_upsert.call_count == 1
     assert db.commit.call_count == 1
 
-
 def test_rollup_no_backlog_upserts_nothing():
     db = MagicMock()
     order_by_mock = (
@@ -175,8 +150,6 @@ def test_rollup_no_backlog_upserts_nothing():
     mock_upsert.assert_not_called()
     db.commit.assert_not_called()
 
-
-
 def test_hard_delete_stale_raw_goes_through_the_batching_helper():
     db = MagicMock()
     with patch.object(retention, "batched_delete", return_value=9001) as mock_bd:
@@ -189,7 +162,6 @@ def test_hard_delete_stale_raw_goes_through_the_batching_helper():
     assert args[2] is retention.CrowdLog.id
     assert mock_bd.call_args.kwargs["batch_size"] == retention.settings.RETENTION_BATCH_SIZE
 
-
 def test_hard_delete_stale_hourly_goes_through_the_batching_helper():
     db = MagicMock()
     with patch.object(retention, "batched_delete", return_value=123) as mock_bd:
@@ -201,7 +173,6 @@ def test_hard_delete_stale_hourly_goes_through_the_batching_helper():
     assert args[1] is retention.CrowdLogHourly
     assert args[2] is retention.CrowdLogHourly.id
     assert mock_bd.call_args.kwargs["batch_size"] == retention.settings.RETENTION_BATCH_SIZE
-
 
 def test_notification_bin_retention_goes_through_the_batching_helper():
     db = MagicMock()
@@ -220,11 +191,7 @@ def test_notification_bin_retention_goes_through_the_batching_helper():
         == notification_bin_retention.settings.RETENTION_BATCH_SIZE
     )
 
-
 def test_notification_bin_retention_large_backlog_end_to_end_through_batched_delete():
-    """End-to-end (without mocking batched_delete itself): a 12,050-row
-    binned backlog is removed in bounded batches with a commit after
-    each one, and the job's returned count reflects the true total."""
     db = MagicMock()
     chain = db.query.return_value.filter.return_value
     chain.limit.return_value.all.side_effect = [

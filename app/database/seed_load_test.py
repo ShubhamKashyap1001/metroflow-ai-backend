@@ -1,14 +1,3 @@
-"""Bulk-seeds high-volume rows into tables that seed_real_data.py does
-not touch (users, journeys, enquiries, alerts, notifications,
-notification_logs, news) so query-plan/EXPLAIN analysis and N+1
-detection are done against realistic row counts instead of an
-empty/near-empty table (which hides missing indexes - Postgres will
-happily seq-scan 50 rows faster than it can use an index).
-
-Not part of the app - a one-off analysis tool. Safe to re-run
-(idempotent per row-count target: skips tables already at/above
-target size).
-"""
 import random
 import uuid
 from datetime import datetime, timedelta, timezone

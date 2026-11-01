@@ -96,8 +96,7 @@ widget) that was never extended to recommendations.
 | Peak request rate, one tab | Up to ~90/min against a 20/min limit | Up to ~1.3/min |
 | Prediction rows written per call | 3, every call (cache hit or miss) | 3, at most once per station per 60s |
 
-`getRecommendations()` (used by `CrowdHeatMap.tsx` on an explicit
-user station selection) and the single-station REST endpoint are both
+`getRecommendations()` and the single-station REST endpoint are
 untouched — this fix only changed how the AI Insights panel triggers
 and batches its own refreshes.
 

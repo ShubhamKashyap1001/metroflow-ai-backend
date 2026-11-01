@@ -1,17 +1,3 @@
-"""Realtime-stability test across TWO simulated API worker processes,
-each with its own ConnectionManager instance, wired to a REAL local
-Redis instance for the cross-process relay (see docs/realtime-websocket-system.md).
-
-This is the actual "multiple browser tabs" production scenario: a load
-balancer can put tab A's socket on worker 1 and tab B's socket on
-worker 2. An event raised on worker 1 (a simulator tick, or a
-request-triggered alert that happened to land on worker 1) must still
-reach tab B on worker 2, continuously, for as long as both tabs stay
-open - with no duplicate deliveries and no dropped ticks.
-
-Requires a real Redis reachable at REDIS_URL (redis://localhost:6379/0
-by default) - this is NOT a mock.
-"""
 import asyncio
 import json
 import os
@@ -29,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.websocket.manager import ConnectionManager  # noqa: E402
 from app.websocket import events  # noqa: E402
 
-
 class FakeWebSocket:
     def __init__(self, name: str):
         self.name = name
@@ -41,14 +26,9 @@ class FakeWebSocket:
     async def send_text(self, payload: str):
         self.received.append(json.loads(payload))
 
-
 async def run():
     loop = asyncio.get_event_loop()
 
-    # Two independent manager instances = two independent worker
-    # processes. Each starts its OWN relay subscriber thread against
-    # the same real Redis instance, exactly like two real uvicorn
-    # workers would.
     worker1 = ConnectionManager()
     worker1.bind_loop(loop)
     worker1.start_relay()
@@ -57,10 +37,6 @@ async def run():
     worker2.bind_loop(loop)
     worker2.start_relay()
 
-    # Give both relay threads a moment to actually subscribe before
-    # anything is published - otherwise the first publish could race
-    # a subscriber that hasn't attached yet (a real startup race, but
-    # not what this test is checking).
     await asyncio.sleep(1.0)
 
     tab_a = FakeWebSocket("tab-A-on-worker1")
@@ -71,17 +47,14 @@ async def run():
 
     TICKS = 6
     for i in range(1, TICKS + 1):
-        # Ticks alternate which "worker" happens to be the elected
-        # simulator leader for that tick - in production this can
-        # change over time as leadership fails over.
+
         leader = worker1 if i % 2 else worker2
         await leader.broadcast(
             events.CROWD_UPDATE,
             {"updates": [{"station_id": 1, "current_count": i}], "timestamp": i},
         )
-        await asyncio.sleep(0.5)  # real network round-trip through Redis
+        await asyncio.sleep(0.5)  
 
-    # Let the last publish's relay round-trip land.
     await asyncio.sleep(0.5)
 
     worker1.stop_relay()
@@ -114,7 +87,6 @@ async def run():
           "tick exactly once via the real Redis relay - no drops, no "
           "duplicates.")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(run()))

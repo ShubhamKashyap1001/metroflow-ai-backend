@@ -1,13 +1,14 @@
 # Background jobs & leader election
 
-MetroFlow runs three continuous background loops: the crowd simulator
+MetroFlow runs five continuous background loops: the crowd simulator
 (`csv_replay_simulator.py`), the train tracker (`train_simulator.py`),
-and the crowd-retention job (`retention.py`, see
+the crowd-retention job (`retention.py`, see
 [crowd-live-state-and-retention.md](./crowd-live-state-and-retention.md)).
-Each must run **exactly once** across the whole deployment, no matter
-how many worker processes or container replicas are running. This doc
-covers how that's guaranteed, and the edge cases that took more than
-one pass to get right.
+The notification-bin retention job and scheduled-report delivery loop
+use the same leader-election mechanism. Every loop must run exactly once
+across the whole deployment, no matter how many worker processes or
+container replicas are running. This doc covers how that's guaranteed,
+and the edge cases that took more than one pass to get right.
 
 ## The problem
 

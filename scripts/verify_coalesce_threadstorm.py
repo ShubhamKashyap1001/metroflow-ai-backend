@@ -1,18 +1,3 @@
-"""Tests ConnectionManager.notify()'s coalescing path (see
-COALESCE_WINDOW_SECONDS / _buffer_for_coalesce in manager.py) under
-concurrent calls from real OS threads - simulating several check-in
-requests landing on FastAPI's threadpool at (almost) the same instant,
-which is exactly how crowd_service triggers a crowd_update today.
-
-notify() is documented as "sync, thread-safe, fire-and-forget" and is
-called from plain `def` (non-async) request handlers running on
-FastAPI's threadpool executor, NOT on the asyncio event loop. This
-schedules work onto the loop via asyncio.run_coroutine_threadsafe, so
-this test reproduces that exact shape: a real asyncio event loop
-running in the main thread, and several worker OS threads calling
-manager.notify() concurrently, the way uvicorn's threadpool really
-would.
-"""
 import asyncio
 import json
 import os
@@ -30,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.websocket.manager import ConnectionManager  # noqa: E402
 from app.websocket import events  # noqa: E402
 
-
 class FakeWebSocket:
     def __init__(self, name: str):
         self.name = name
@@ -41,7 +25,6 @@ class FakeWebSocket:
 
     async def send_text(self, payload: str):
         self.received.append(json.loads(payload))
-
 
 async def run():
     loop = asyncio.get_event_loop()
@@ -56,10 +39,7 @@ async def run():
     barrier = threading.Barrier(NUM_THREADS)
 
     def worker(i: int):
-        # Every real request-handling thread hits the barrier at once,
-        # then calls notify() - reproducing a genuine "request storm"
-        # (several check-ins landing in the same instant) rather than
-        # calls that happen to be staggered enough to never race.
+
         barrier.wait()
         manager.notify(
             events.CROWD_UPDATE,
@@ -70,16 +50,12 @@ async def run():
     for t in threads:
         t.start()
 
-    # Let the event loop actually run while the OS threads execute -
-    # asyncio.run_coroutine_threadsafe needs the loop to be spinning
-    # to pick up each scheduled coroutine.
     start = time.monotonic()
     while any(t.is_alive() for t in threads) and time.monotonic() - start < 5:
         await asyncio.sleep(0.01)
     for t in threads:
         t.join(timeout=2)
 
-    # Coalesce window is 0.2s - wait comfortably past it.
     await asyncio.sleep(0.6)
 
     print("=== Threadpool request-storm coalescing ===")
@@ -115,7 +91,6 @@ async def run():
         return 1
     print("\nRequest-storm coalescing check passed.")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(run()))

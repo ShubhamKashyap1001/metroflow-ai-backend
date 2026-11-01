@@ -1,27 +1,3 @@
-"""SMS dispatch for the Alert & Notification Module, via Twilio's REST
-API. Uses Twilio because it's the most widely available SMS provider
-with a free trial, and its API is a single authenticated POST request
-- so this uses Python's built-in urllib instead of adding the twilio
-SDK as a new dependency.
-
-Needs a Twilio account (https://www.twilio.com/try-twilio): the
-Account SID, Auth Token, and a Twilio phone number to send from, all
-set in .env (see TWILIO_* below). Without those set, this degrades
-the same way app/core/email.py does when SMTP isn't configured - it
-logs "not configured" per recipient instead of raising.
-
-Phase 10 - transient-failure retry (see docs/notification-delivery.md)
------------------------------------------------------------------
-Mirrors the retry classifier added to app/core/email.py: a network-
-level failure reaching Twilio at all (`urllib.error.URLError` -
-connection refused, DNS failure, timeout) or a 5xx/429 ("rate
-limited"/"try again") HTTP response is TRANSIENT and gets retried
-with backoff. A 4xx response other than 429 (bad auth, invalid
-number, malformed request) is PERMANENT - retrying it would just
-waste the backoff window on something that can never succeed. Same
-NOTIFICATION_SEND_MAX_ATTEMPTS/NOTIFICATION_SEND_RETRY_BACKOFF_*
-settings as email, and the same one-outcome-per-recipient contract.
-"""
 import base64
 import logging
 import time
@@ -52,16 +28,10 @@ def _build_alert_sms(
     return text[:300]
 
 def _is_transient_sms_error(exc: Exception) -> bool:
-    """True for a network-level failure to reach Twilio at all, or an
-    HTTP 429 ("too many requests")/5xx ("their problem, try again")
-    response. False for any other HTTPError (4xx - bad auth, invalid
-    number, malformed request - permanent, retrying can't help)."""
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code == 429 or exc.code >= 500
     if isinstance(exc, urllib.error.URLError):
-        # Covers connection-refused/DNS/timeout - HTTPError is also a
-        # URLError subclass, so this branch only ever sees the
-        # non-HTTP cases (no response was received at all).
+
         return True
     return isinstance(exc, (TimeoutError, ConnectionError, OSError))
 
@@ -73,22 +43,6 @@ def send_alert_sms(
     available_until: str | None = None,
     resolved: bool = False,
 ) -> dict[str, str]:
-    """Send the alert SMS to every recipient phone number, retrying a
-    TRANSIENT failure (see `_is_transient_sms_error`) up to
-    `settings.NOTIFICATION_SEND_MAX_ATTEMPTS` times with backoff
-    before giving up on that recipient. A permanent failure (bad
-    auth, invalid number) fails on the first attempt, no retry.
-
-    Set `resolved=True` to send the short "this has been resolved"
-    version instead of the original alert text - used by
-    dispatch_alert_resolution_notifications() in alert_service.py.
-
-    Returns {phone: "sent"} or {phone: "failed: <reason>"} per
-    recipient - exactly one outcome per recipient no matter how many
-    attempts it took - mirrors app/core/email.py's send_alert_emails()
-    return shape so alert_service.py can log both channels the same
-    way. Never raises.
-    """
     results: dict[str, str] = {}
 
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
@@ -125,8 +79,7 @@ def send_alert_sms(
                 req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
                 with urllib.request.urlopen(req, timeout=15) as resp:
-                    # urlopen raises HTTPError itself for any non-2xx
-                    # status, so reaching here means success.
+
                     results[recipient] = "sent"
                     last_exc = None
                 break

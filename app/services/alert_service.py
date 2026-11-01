@@ -12,6 +12,7 @@ from app.enums.notification_channel import NotificationChannel
 from app.enums.notification_source import NotificationSource
 from app.enums.notification_status import NotificationStatus
 from app.models.alert import Alert
+from app.models.alert_incident_event import AlertIncidentEvent
 from app.models.notification_log import NotificationLog
 from app.models.station import Station
 from app.models.user_profile import UserProfile
@@ -22,18 +23,6 @@ from app.utils.geo import cities_for_state
 from app.websocket.events import STATION_ALERT
 from app.websocket.manager import manager
 
-# Phase 9: both list_alerts (dashboard alert feed) and
-# list_alert_notifications (per-alert email/SMS delivery log) used to
-# run `.all()` with no limit/offset at all - on a long-running deployment
-# either can grow into the tens/hundreds of thousands of rows (every
-# alert ever raised; every recipient x channel row for a single alert
-# sent to the whole active user base), so an unauthenticated-looking but
-# otherwise ordinary GET could pull the entire table into memory and
-# serialize it as one giant JSON response. Same shape as the
-# MAX_BULK_RECOMMENDATION_STATIONS cap in app/api/v1/prediction.py and
-# the admin /logs limit clamp - a default page size plus a hard upper
-# bound, enforced here (not just in the router) so any other caller of
-# these service functions gets the same protection for free.
 DEFAULT_ALERTS_LIMIT = 100
 MAX_ALERTS_LIMIT = 500
 
@@ -46,10 +35,6 @@ def _clamp(value: int, default: int, maximum: int) -> int:
     return min(max(value, 1), maximum)
 
 def _broadcast_alert(db: Session, alert: Alert, resolved: bool) -> None:
-    """Pushes the alert to every connected operator immediately over
-    /ws/monitor - the sync/thread-safe notify() variant, since this is
-    called from plain `def` routes/services running in FastAPI's
-    threadpool (see app/websocket/manager.py)."""
     station = db.get(Station, alert.station_id)
     manager.notify(STATION_ALERT, {
         "alert_id": alert.id,
@@ -96,6 +81,8 @@ def create_alert(db: Session, payload: AlertCreate, created_by: str | None = Non
     db.add(alert)
     db.commit()
     db.refresh(alert)
+    db.add(AlertIncidentEvent(alert_id=alert.id, actor_id=created_by, action="created"))
+    db.commit()
 
     _broadcast_alert(db, alert, resolved=False)
 
@@ -118,32 +105,7 @@ def get_alert(db: Session, alert_id: int) -> Alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     return alert
 
-def resolve_alert(db: Session, alert_id: int) -> tuple[Alert, bool]:
-    """Returns `(alert, just_resolved)`. `just_resolved` is True only
-    on the call that actually flips `is_resolved` False -> True - a
-    repeat call for an already-resolved alert (a retried request after
-    a dropped response, a double-click, a client that times out and
-    resubmits) returns the same alert with `just_resolved=False` and
-    performs no further writes or broadcasts.
-
-    The caller (PATCH /alerts/{id}/resolve) MUST gate its
-    resolution-notification dispatch on `just_resolved`, not on the
-    request merely having `notify_on_resolve=true` - otherwise every
-    repeat/retried call re-sends the resolution email/SMS/bell
-    notification for an alert that was already resolved, which is
-    exactly the "duplicate notifications" bug this guards against. See
-    docs/notification-delivery.md.
-
-    The False->True flip itself is done as a single atomic
-    UPDATE ... WHERE is_resolved = false (a compare-and-swap on the
-    row), not a Python-level read-then-write. Two simultaneous resolve
-    requests for the same alert both reach this UPDATE; the database's
-    row lock lets only one of them actually match the
-    `is_resolved = false` predicate and flip the row - the other
-    matches zero rows and gets `just_resolved=False` back, so only one
-    caller ever proceeds to broadcast/notify, regardless of request
-    timing.
-    """
+def resolve_alert(db: Session, alert_id: int, actor_id=None) -> tuple[Alert, bool]:
     alert = get_alert(db, alert_id)
 
     resolved_at = datetime.now(timezone.utc)
@@ -155,31 +117,64 @@ def resolve_alert(db: Session, alert_id: int) -> tuple[Alert, bool]:
     just_resolved = result.rowcount == 1
 
     if not just_resolved:
-        # Nothing to commit or broadcast - a retried/duplicated request
-        # for an already-resolved alert must be a true no-op, exactly
-        # as documented above.
+
         return alert, False
 
-    # Reflect the flip on the in-memory object immediately rather than
-    # relying solely on db.refresh() to re-fetch it - the caller must
-    # see just_resolved=True paired with an alert whose is_resolved is
-    # already True.
     alert.is_resolved = True
     alert.resolved_at = resolved_at
 
+    db.add(AlertIncidentEvent(alert_id=alert.id, actor_id=actor_id, action="resolved"))
     db.commit()
     db.refresh(alert)
     _broadcast_alert(db, alert, resolved=True)
     return alert, just_resolved
 
+def acknowledge_alert(db: Session, alert_id: int, actor_id, note: str | None = None) -> Alert:
+    alert = get_alert(db, alert_id)
+    if alert.is_resolved:
+        raise HTTPException(status_code=409, detail="Resolved alerts cannot be acknowledged")
+    if alert.acknowledged_at is None:
+        alert.acknowledged_at = datetime.now(timezone.utc)
+        alert.acknowledged_by_id = actor_id
+        db.add(AlertIncidentEvent(alert_id=alert.id, actor_id=actor_id, action="acknowledged", note=(note or "").strip() or None))
+        db.commit()
+        db.refresh(alert)
+        _broadcast_alert(db, alert, resolved=False)
+    return alert
+
+def assign_alert(db: Session, alert_id: int, assigned_to_id, actor_id) -> Alert:
+    alert = get_alert(db, alert_id)
+    if alert.is_resolved:
+        raise HTTPException(status_code=409, detail="Resolved alerts cannot be reassigned")
+    assignee = db.get(UserProfile, assigned_to_id) if assigned_to_id else None
+    if assigned_to_id and (not assignee or not assignee.is_active or assignee.role.value not in ("admin", "operator")):
+        raise HTTPException(status_code=422, detail="Assignee must be an active admin or operator")
+    if alert.assigned_to_id != assigned_to_id:
+        alert.assigned_to_id = assigned_to_id
+        db.add(AlertIncidentEvent(
+            alert_id=alert.id,
+            actor_id=actor_id,
+            action="unassigned" if assigned_to_id is None else "assigned",
+            note=f"Assigned to {assignee.full_name}" if assignee else "Assignment cleared",
+        ))
+        db.commit()
+        db.refresh(alert)
+        _broadcast_alert(db, alert, resolved=False)
+    return alert
+
+def list_incident_events(db: Session, alert_id: int) -> list[AlertIncidentEvent]:
+    get_alert(db, alert_id)
+    return (
+        db.query(AlertIncidentEvent)
+        .filter(AlertIncidentEvent.alert_id == alert_id)
+        .order_by(AlertIncidentEvent.created_at.desc(), AlertIncidentEvent.id.desc())
+        .limit(100)
+        .all()
+    )
+
 def _already_sent_recipients(
     db: Session, job_id: int | None, channel: NotificationChannel
 ) -> set[str]:
-    """Recipients this specific dispatch job has already sent `channel`
-    to, per NotificationLog. Returns an empty set when `job_id` is
-    None (no idempotency scoping available - e.g. a caller outside the
-    durable dispatch queue), so behaviour for such callers is
-    unchanged."""
     if job_id is None:
         return set()
     rows = (
@@ -236,37 +231,9 @@ def _dispatch(
     resolved: bool,
     job_id: int | None = None,
 ) -> None:
-    """Runs in a FastAPI BackgroundTask (its own thread, its own DB
-    session - never the request's).
-
-    Phase 6 fix: this used to hold ONE db session/connection open for
-    its entire body, including the two blocking network calls
-    (send_alert_emails / send_alert_sms) - a real "long transaction"
-    bug: a slow SMTP/Twilio round trip (or many recipients) held a
-    pooled connection idle-but-checked-out for the whole time, making
-    it unavailable to every other request. Restructured into three
-    short, independent steps so a DB connection is only ever held for
-    the fast read/write portions - see docs/database-sessions-and-connection-pooling.md.
-
-    BUGFIX (duplicate dispatch on crash-recovery): `job_id` scopes this
-    call to a single notification_dispatch_jobs row. When
-    notification_dispatch_queue.run_job resumes a job that a previous
-    process died in the middle of, some recipients may already have a
-    logged SENT NotificationLog row for this exact job_id from that
-    earlier, incomplete attempt (the emails/SMS genuinely went out
-    before the crash - only the bookkeeping after didn't finish). Those
-    recipients are excluded before the network call is ever made, so a
-    resumed job cannot re-send to someone it already successfully
-    reached. Recipients that were never attempted, or that failed, are
-    NOT excluded - retries are unaffected. `job_id=None` (any caller
-    outside the durable queue) disables this filtering entirely,
-    matching prior behaviour."""
     if not notify_email and not notify_sms:
         return
 
-    # Step 1: read everything this dispatch needs, as plain values (not
-    # ORM objects), then close the session immediately - nothing below
-    # this block touches `db1`.
     db1 = SessionLocal()
     try:
         alert = db1.get(Alert, alert_id)
@@ -283,17 +250,6 @@ def _dispatch(
         alert_message = alert.message
         alert_created_at = alert.created_at.isoformat()
 
-        # RAM FIX (Render Free 512MB): this used to pull full UserProfile
-        # ORM rows (id, email, full_name, username, phone, avatar_url,
-        # role, is_active, timestamps) for every active real user just
-        # to read two columns off each one below - on a deployment with
-        # a large passenger base this is real per-broadcast memory that
-        # scales with the whole user table, not with anything about the
-        # alert itself, and every alert create/resolve re-runs it.
-        # Selecting only (email, phone) keeps the exact same recipient
-        # set (same filter, same rows) while avoiding hydrating a full
-        # ORM instance - and every column that's still an inflated
-        # Python object either way - per active user.
         active_user_rows = (
             db1.query(UserProfile.email, UserProfile.phone)
             .filter(
@@ -314,17 +270,12 @@ def _dispatch(
         if creator and creator.phone:
             phones.add(creator.phone)
 
-        # Idempotency: drop anyone this exact job already succeeded in
-        # sending to on a previous (crashed/resumed) attempt, so a
-        # re-run can only ever reach a given recipient once.
         if job_id is not None:
             emails -= _already_sent_recipients(db1, job_id, NotificationChannel.EMAIL)
             phones -= _already_sent_recipients(db1, job_id, NotificationChannel.SMS)
     finally:
         db1.close()
 
-    # Step 2: the actual slow part - blocking SMTP/Twilio network calls,
-    # deliberately done with NO db session open at all.
     email_results = None
     sms_results = None
     if notify_email and emails:
@@ -347,8 +298,6 @@ def _dispatch(
             resolved=resolved,
         )
 
-    # Step 3: a second short session just to log the outcomes - opened
-    # only now that the slow network calls are already done.
     if email_results is None and sms_results is None:
         return
     db2 = SessionLocal()
@@ -376,26 +325,11 @@ def dispatch_alert_notifications(
     notify_sms: bool,
     job_id: int | None = None,
 ) -> None:
-    """Send the original alert email and/or SMS to every active user,
-    plus an explicit copy to whoever raised it, and log one
-    NotificationLog row per (channel, recipient).
-
-    `job_id` (the owning notification_dispatch_jobs row, when called
-    via the durable dispatch queue) scopes the crash-recovery
-    idempotency check in `_dispatch` - see its docstring."""
     _dispatch(alert_id, created_by_id, notify_email, notify_sms, resolved=False, job_id=job_id)
 
 def dispatch_alert_resolution_notifications(
     alert_id: int, resolved_by_id: str | None, job_id: int | None = None
 ) -> None:
-    """Re-notify the same audience that the alert has been resolved,
-    on the same channel(s) (email/SMS) it was originally raised on -
-    read from the alert's own notify_email/notify_sms columns, so the
-    caller (the /resolve endpoint) doesn't need to repeat them.
-
-    `job_id` (the owning notification_dispatch_jobs row, when called
-    via the durable dispatch queue) scopes the crash-recovery
-    idempotency check in `_dispatch` - see its docstring."""
     db = SessionLocal()
     try:
         alert = db.get(Alert, alert_id)

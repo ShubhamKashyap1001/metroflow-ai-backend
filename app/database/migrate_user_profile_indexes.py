@@ -1,27 +1,3 @@
-"""One-off migration to add the index declared on
-UserProfile.__table_args__ (app/models/user_profile.py):
-
-    ix_user_profiles_created_at
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never adds an index to a table that already exists. The
-`user_profiles` table originally shipped with no index beyond its
-primary key and the implicit one from `email`'s `unique=True`, so if it
-was created before this update, run this once so
-app/api/v1/users.py::get_users() (the admin "User Management" list,
-now paginated - see DEFAULT_USERS_LIMIT/MAX_USERS_LIMIT there) stops
-doing a full table sort of user_profiles on every page:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_user_profile_indexes
-
-Safe to run more than once - uses IF NOT EXISTS. Uses CONCURRENTLY so it
-doesn't lock writes on user_profiles while building - note that
-CONCURRENTLY can't run inside a transaction block, hence the
-isolation_level="AUTOCOMMIT" connection below.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

@@ -1,4 +1,3 @@
-"""Event name constants broadcast over the /ws/monitor channel."""
 
 CROWD_UPDATE = "crowd_update"
 SCHEDULE_UPDATE = "schedule_update"

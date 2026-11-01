@@ -16,23 +16,16 @@ from app.utils.timezone import business_now
 
 LIVE_STATUS_CACHE_TTL_SECONDS = 15
 
-
 def _station_name(db: Session, station_id: int) -> str:
     station = db.get(Station, station_id)
     return station.station_name if station else "Unknown station"
 
-
 def _crowd_level(db: Session, station_id: int):
-    """None if the station has no live crowd reading yet, or if the
-    lookup itself fails - kept independently defensive (its own
-    try/except) so a crowd-data hiccup only drops the crowd badge,
-    not the next-train ETA this whole widget exists for."""
     try:
         snapshot = crowd_service.get_latest_crowd(db, station_id)
         return snapshot["crowd_level"] if snapshot else None
     except Exception:
         return None
-
 
 def get_my_route(db: Session, user_id: str) -> SavedRoute | None:
     return (
@@ -40,7 +33,6 @@ def get_my_route(db: Session, user_id: str) -> SavedRoute | None:
         .filter(SavedRoute.user_id == user_id)
         .first()
     )
-
 
 def set_my_route(
     db: Session, user_id: str, origin_station_id: int, destination_station_id: int
@@ -74,7 +66,6 @@ def set_my_route(
     cache.delete(f"saved_route:live:{user_id}")
     return route
 
-
 def delete_my_route(db: Session, user_id: str) -> None:
     existing = get_my_route(db, user_id)
     if not existing:
@@ -83,11 +74,7 @@ def delete_my_route(db: Session, user_id: str) -> None:
     db.commit()
     cache.delete(f"saved_route:live:{user_id}")
 
-
 def get_my_route_live(db: Session, user_id: str) -> SavedRouteLiveStatus | None:
-    """Live next-departure/ETA for the user's saved route, or None if
-    they haven't saved one yet (caller returns 404 for that case).
-    """
     route = get_my_route(db, user_id)
     if not route:
         return None

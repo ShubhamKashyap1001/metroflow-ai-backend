@@ -1,41 +1,3 @@
-"""Dashboard metrics for the production delay-prediction model.
-
-Powers the delay section of the "AI Prediction" dashboard page, same
-role as crowd_metrics.py plays for the crowd/demand model.
-
-IMPORTANT - what actually runs in the deployed API process:
-`compute_delay_metrics()` (the function prediction_service.py calls)
-only reads the small precomputed `delay_model_metrics.json` file below
-- it never touches delay_model.pkl and never reads the source CSVs at
-request time. See crowd_metrics.py's module docstring for the full
-reasoning (same OOM concern: showing a Random Forest vs XGBoost
-comparison needs both fitted candidates in memory at once, which is
-only ever done OFFLINE now, by
-colab_training/precompute_dashboard_metrics.py). Re-run that script
-after retraining and redeploy the refreshed
-delay_model_metrics.json alongside the new delay_model.pkl.
-
-`_live_compute_delay_metrics()` below still holds the real evaluation
-logic and is kept as the single source of truth for it, but is only
-ever invoked by the offline precompute script.
-
-Design notes (for _live_compute_delay_metrics):
-- Rebuilds the exact same 8-feature (station_id, hour, day_of_week,
-  is_weekend, is_peak_hour, passenger_count, capacity_passengers,
-  train_age_days) -> delay_minutes training table that
-  colab_training/train_delay_model.py builds via
-  _real_dataset_builder.py (duplicated here rather than imported,
-  since colab_training/ is intentionally standalone with no `app`
-  package dependency - same reasoning as crowd_metrics.py), then
-  re-creates its train_test_split(test_size=0.2, random_state=42) to
-  get the identical held-out test rows.
-- Delay is a pure regression target (minutes of delay) - there's no
-  natural class bucketing for it the way crowd has CrowdLevel, so this
-  only reports MAE/MAPE/R2 and feature importance, unlike
-  CrowdModelMetrics which also has accuracy/macro_f1/confusion_matrix.
-- Cached for the life of the process - the dataset/model are static
-  files, so recomputing on every poll would be wasted CPU.
-"""
 import json
 import os
 from functools import lru_cache
@@ -49,9 +11,7 @@ from sklearn.model_selection import train_test_split
 from app.utils.timezone import business_today
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model.pkl")
-# Precomputed offline (see colab_training/precompute_dashboard_metrics.py)
-# from a build-time bundle that has BOTH fitted candidates. This is the
-# only thing the running API reads - see module docstring above.
+
 METRICS_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "delay_model_metrics.json")
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "datasets", "source")
 STATIONS_CSV = os.path.join(DATASET_DIR, "stations.csv.gz")
@@ -59,27 +19,12 @@ PASSENGER_FLOW_CSV = os.path.join(DATASET_DIR, "passenger_flow.csv.gz")
 TRAIN_OPERATIONS_CSV = os.path.join(DATASET_DIR, "train_operations.csv.gz")
 TRAINS_CSV = os.path.join(DATASET_DIR, "trains.csv.gz")
 
-# MEMORY FIX: both passenger_flow.csv.gz and train_operations.csv.gz
-# are large production datasets. A plain pd.read_csv() on either
-# pulled every column (most of them unused here) and every row into
-# RAM in one shot. This module only needs the columns below, so both
-# are read with usecols=..., and both are streamed in bounded
-# CSV_CHUNK_SIZE-row chunks rather than parsed whole - see
-# _crowd_table() and _delay_table() for what each chunk is reduced to
-# before the next one is read.
 PASSENGER_FLOW_USECOLS = ["station_id", "hour", "day_of_week", "is_weekend", "entries", "exits"]
 TRAIN_OPERATIONS_USECOLS = [
     "station_id", "train_id", "scheduled_arrival", "delay_arrival_min", "weather",
 ]
 CSV_CHUNK_SIZE = 100_000
 
-# Kept in sync with delay_predictor.py / colab_training/train_delay_model.py:
-# the shipped delay_model.pkl is the 8-feature real-data generation (adds
-# capacity_passengers + train_age_days on top of the original 6). This used
-# to be 6 features here, which silently broke this dashboard card (the
-# X_test[model_features] selection below would KeyError on the 2 missing
-# columns, get swallowed by the try/except in compute_delay_metrics(), and
-# fall back to "no trained model" even though delay_model.pkl loads fine).
 FEATURES = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour",
             "passenger_count", "capacity_passengers", "train_age_days", "weather_code"]
 TARGET = "delay_minutes"
@@ -87,11 +32,7 @@ TARGET = "delay_minutes"
 DISPLAY_NAMES = {
     "random_forest": "Random Forest",
     "xgboost": "XGBoost",
-    # Current production artifacts (Sept 2026 retrain) suffix the
-    # winning candidate name with "_tuned" (see colab_training/
-    # train_metroflow_models_colab.ipynb) - map those too so the
-    # dashboard still shows a friendly label instead of the raw
-    # internal model_name string.
+
     "random_forest_tuned": "Random Forest",
     "xgboost_tuned": "XGBoost",
 }
@@ -99,21 +40,6 @@ DISPLAY_NAMES = {
 WEATHER_CODE = {"Sunny": 0, "Overcast": 1, "Rainy": 2, "Stormy": 3}
 
 def _station_id_map() -> dict[str, int]:
-    """Same cleaning/ordering as colab_training/_real_dataset_builder.py
-    ::_station_id_map and app/database/seed_real_data.py (which assigns
-    the real DB station.id the exact same way), kept in sync manually
-    so training and evaluation never drift apart.
-
-    Bug fix: this used to ignore the dataset's own `station_id` column
-    and invent a fresh 1..N numbering by sorting stations by (city,
-    line, station_name), joining passenger_flow/train_operations back
-    on a (city, station_name) key. That numbering never matched the
-    row-order numbering the training builder/seeder actually assign, so
-    every evaluation row got a scrambled station_id relative to what
-    the model was trained on - see crowd_metrics.py for the full
-    writeup of the same bug there. Mapping the native station_id string
-    directly fixes it here too.
-    """
     stations = pd.read_csv(STATIONS_CSV)
     for col in ["station_id", "city", "line", "station_name"]:
         stations[col] = stations[col].astype(str).str.strip()
@@ -124,41 +50,15 @@ def _station_id_map() -> dict[str, int]:
     return dict(zip(stations["station_id"], stations["int_station_id"]))
 
 def _train_info_map() -> pd.DataFrame:
-    """Real per-train capacity_passengers/train_age_days - mirrors
-    colab_training/_real_dataset_builder.py::_train_info_map so this
-    dashboard evaluates the model against the exact same real per-train
-    values (never invented) that delay_predictor.py reads from the DB
-    and that train_delay_model.py trained on."""
     trains = pd.read_csv(TRAINS_CSV)
     trains["train_id"] = trains["train_id"].astype(str).str.strip()
     trains["commissioned_date"] = pd.to_datetime(trains["commissioned_date"])
     trains = trains.reset_index(drop=True)
-    # BUGFIX (naive datetime / timezone handling): pd.Timestamp.now()
-    # reads the naive server-local clock, which can disagree with the
-    # app's configured business timezone (and drifts train_age_days by
-    # a day right around midnight depending on what timezone the
-    # process happens to run in) - same class of bug already fixed in
-    # delay_predictor.py's _real_train_age_days for this identical
-    # feature. See app/utils/timezone.py.
     today = pd.Timestamp(business_today())
     trains["train_age_days"] = (today - trains["commissioned_date"]).dt.days.astype(float)
     return trains[["train_id", "capacity_passengers", "train_age_days"]]
 
 def _crowd_table(station_id_map: dict) -> pd.DataFrame:
-    """Same real passenger_count table crowd_metrics.py builds - the
-    delay model was trained with passenger_count as a feature, so the
-    training table needs it too.
-
-    MEMORY FIX: streams passenger_flow.csv.gz in bounded
-    CSV_CHUNK_SIZE-row chunks (only PASSENGER_FLOW_USECOLS columns)
-    and reduces each chunk to a partial sum/count per (station_id,
-    hour, day_of_week, is_weekend, is_peak_hour) group immediately,
-    instead of materializing the whole file as one DataFrame. The
-    partial sums are combined and divided once at the end (mean =
-    sum/count, rounded to int) in the same sorted group-key order a
-    single-shot groupby(...).mean() would produce, so the result is
-    unchanged - only one CSV_CHUNK_SIZE-row chunk plus these small
-    running per-group totals are ever resident in memory at once."""
     partial_group_sums: list[pd.DataFrame] = []
     group_keys = ["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"]
 
@@ -185,20 +85,6 @@ def _crowd_table(station_id_map: dict) -> pd.DataFrame:
     return combined[group_keys + ["passenger_count"]].sort_values(group_keys).reset_index(drop=True)
 
 def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame:
-    """Row-level (not grouped by station/hour/day only) - capacity_passengers
-    and train_age_days are real per-train continuous values, so grouping
-    them away before merging (like the old 6-feature version of this
-    function did) would lose exactly the signal those 2 features exist to
-    capture. Mirrors colab_training/_real_dataset_builder.py::build_delay_dataset.
-
-    MEMORY FIX: every row of train_operations.csv.gz is genuinely
-    needed here (this table stays row-level, it's never aggregated
-    away), but only TRAIN_OPERATIONS_USECOLS columns are - so the file
-    is read with usecols=... and streamed in bounded
-    CSV_CHUNK_SIZE-row chunks, with each chunk immediately reduced to
-    its final derived/merged columns before the next chunk is parsed,
-    instead of holding the full wide (17-column) file in memory while
-    deriving columns on it."""
     kept_chunks: list[pd.DataFrame] = []
     total_before = 0
 
@@ -216,13 +102,6 @@ def _delay_table(station_id_map: dict, train_info: pd.DataFrame) -> pd.DataFrame
         chunk["is_weekend"] = (chunk["day_of_week"] >= 5).astype(int)
         chunk["is_peak_hour"] = ((chunk["hour"].between(8, 11)) | (chunk["hour"].between(17, 20))).astype(int)
         chunk["delay_minutes"] = chunk["delay_arrival_min"].fillna(0).clip(lower=0)
-        # Bug fix: the shipped delay_model.pkl was trained with a 9th
-        # feature, weather_code (see colab_training/_real_dataset_builder.py
-        # ::build_delay_dataset and delay_predictor.py), but this table
-        # never built that column - X_test[model_features] below raised a
-        # KeyError on every request, which the try/except in
-        # compute_delay_metrics() swallowed into a permanent "no trained
-        # model" empty state for the whole delay dashboard card.
         chunk["weather_code"] = chunk["weather"].map(WEATHER_CODE).fillna(0).astype(int)
 
         chunk = chunk.merge(train_info, on="train_id", how="left")
@@ -266,9 +145,6 @@ def _unavailable() -> dict:
     }
 
 def _evaluate_one(model, model_features, X_test, y_test_arr, trained_rows) -> dict:
-    """Same shape as crowd_metrics._evaluate_one, minus the
-    classification-only fields (accuracy/macro_f1/confusion_matrix)
-    that don't apply to a pure regression target like delay minutes."""
     predicted = model.predict(X_test[model_features])
 
     mae = float(mean_absolute_error(y_test_arr, predicted))
@@ -305,11 +181,6 @@ def _evaluate_one(model, model_features, X_test, y_test_arr, trained_rows) -> di
 
 @lru_cache(maxsize=1)
 def compute_delay_metrics() -> dict:
-    """What the running API actually calls (see
-    prediction_service.get_delay_model_metrics). Reads the small
-    precomputed JSON file only - never unpickles delay_model.pkl, never
-    reads the source CSVs, never holds more than the single production
-    model in this process's memory. See module docstring for why."""
     if not os.path.exists(METRICS_JSON_PATH):
         print(f"[{__name__}] no precomputed metrics at {METRICS_JSON_PATH} - "
               f"run colab_training/precompute_dashboard_metrics.py")
@@ -321,13 +192,7 @@ def compute_delay_metrics() -> dict:
         print(f"[{__name__}] failed to read {METRICS_JSON_PATH}: {exc!r}")
         return _unavailable()
 
-
 def _live_compute_delay_metrics() -> dict:
-    """Real evaluation logic - loads delay_model.pkl and the source
-    CSVs, evaluates every candidate in bundle["models"] against a fresh
-    held-out split. NOT called by the running API (see module
-    docstring) - only by colab_training/precompute_dashboard_metrics.py,
-    offline, against a build-time bundle that has both candidates."""
     bundle = _load_model()
     if bundle is None:
         return _unavailable()
@@ -352,12 +217,7 @@ def _live_compute_delay_metrics() -> dict:
             on=["station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"],
             how="left",
         )
-        # A handful of (station, hour, day_of_week, is_weekend, is_peak_hour)
-        # combos in train_operations may have no matching passenger_flow
-        # rows; fall back to that station's overall average rather than
-        # leaving passenger_count as NaN (same fallback the training-side
-        # build_delay_dataset() uses, so this doesn't diverge from what the
-        # model was actually trained on).
+
         station_avg = crowd.groupby("station_id")["passenger_count"].mean()
         merged["passenger_count"] = merged["passenger_count"].fillna(
             merged["station_id"].map(station_avg)
@@ -378,19 +238,6 @@ def _live_compute_delay_metrics() -> dict:
             evaluated["model_name"] = DISPLAY_NAMES.get(name, name)
             models_out[name] = evaluated
 
-        # Bug fix: `trained_name` is whatever colab_training picked as the
-        # winner using ITS OWN dataset build/test split at training time.
-        # models_out above is a fresh, independent re-evaluation (this
-        # module's own dataset build + train_test_split(random_state=42)) -
-        # normally identical, but the two can disagree (different data
-        # snapshot since training, a chunked-vs-single-shot aggregation
-        # rounding difference, etc). Trusting the stale `trained_name` in
-        # that case shows an "Active" badge on a candidate whose own MAE/R2
-        # displayed right next to it is visibly worse than the other card -
-        # exactly the mismatch this fixes. Pick the winner from the live
-        # numbers actually being displayed instead, so the badge always
-        # matches what's on screen; still fall back to `trained_name` (then
-        # the first candidate) if MAE is missing for every candidate.
         scored = [(name, m) for name, m in models_out.items() if m.get("mae") is not None]
         if scored:
             winner_name, best = min(scored, key=lambda item: item[1]["mae"])

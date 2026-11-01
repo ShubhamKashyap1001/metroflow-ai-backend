@@ -30,24 +30,6 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 def _stage_crowd_delta(db: Session, station: Station, delta: int) -> tuple[int, CrowdLevel]:
-    """Apply a passenger check-in/out delta to `station`'s crowd count.
-
-    A real check-in/check-out is a genuine, discrete event (not
-    per-tick simulator noise), so - unlike the simulator's sampled
-    history writes - it always:
-      1. Atomically applies the delta to the live table
-         (station_crowd_state) via apply_live_state_delta(), which
-         takes a row lock so concurrent check-ins on the SAME station
-         can't lose an increment to a race (see that function's
-         docstring - this was verified as a real bug during Phase 2
-         and fixed here).
-      2. Stages ONE historical CrowdLog row (kept, not sampled/skipped)
-         so inflow/outflow analytics still count every real passenger
-         movement, not just the simulator's background CSV replay.
-
-    Returns (new_count, level) so the caller can broadcast the same
-    values it just persisted without an extra read.
-    """
     new_count, level = apply_live_state_delta(db, station, delta)
     db.add(CrowdLog(
         station_id=station.id,
@@ -82,34 +64,17 @@ def check_in(db: Session, user_id: str, source_station_id: int, destination_stat
     try:
         db.commit()
     except IntegrityError:
-        # Belt-and-braces for the check-then-insert race above: two
-        # simultaneous requests can both pass the active_journey_for_user()
-        # check before either commits. The DB's partial unique index
-        # (ux_journeys_one_active_per_user, one ACTIVE row per user_id)
-        # lets exactly one of them win; the loser lands here instead of
-        # creating a second ACTIVE journey.
+
         db.rollback()
         raise HTTPException(status_code=400, detail="You already have an active journey - check out first")
     db.refresh(journey)
     invalidate_station_cache(source)
-    # Live flow: backend change -> WebSocket -> frontend, no refresh
-    # needed. The passenger's own +1 is visible to every open
-    # dashboard tab immediately, not just on the simulator's next tick.
+
     broadcast_crowd_update(source, new_count, level)
     return journey
 
 def check_out(db: Session, user_id: str, journey_id: int) -> Journey:
-    # SELECT ... FOR UPDATE locks this journey row for the duration of
-    # the transaction (same fix already used for station crowd state -
-    # see apply_live_state_delta's docstring). Without it, two
-    # simultaneous checkout requests for the same journey can both
-    # read status=ACTIVE before either commits, and both go on to
-    # apply the fare/status update AND the crowd deltas below -
-    # completing the journey twice and double-counting the
-    # source/destination crowd change. The second request now blocks
-    # here until the first commits, then re-reads status as COMPLETED
-    # and is rejected by the check below instead of repeating the
-    # update.
+
     journey = (
         db.query(Journey)
         .filter(Journey.id == journey_id)
@@ -134,20 +99,6 @@ def check_out(db: Session, user_id: str, journey_id: int) -> Journey:
     journey.fare = fare
     journey.status = JourneyStatus.COMPLETED
 
-    # A checkout is a passenger LEAVING source and ARRIVING at
-    # destination - both live counts must move, or destination
-    # stations never reflect anyone who actually traveled there via
-    # check-in/check-out (only the simulator's own CSV-replay
-    # passengers would ever touch destination counts). Verified as a
-    # real gap: this previously only staged the -1 at source and
-    # never touched destination at all.
-    #
-    # Lock the two stations' rows in a fixed order (ascending id)
-    # rather than source-then-destination: apply_live_state_delta
-    # takes a row lock per station, and locking in travel order would
-    # deadlock two concurrent checkouts going opposite directions
-    # between the same pair of stations (A->B locks A then waits on
-    # B, while B->A locks B then waits on A, at the same time).
     deltas = {source.id: -1, destination.id: +1}
     results = {}
     for station in sorted((source, destination), key=lambda s: s.id):

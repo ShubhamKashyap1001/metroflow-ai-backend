@@ -1,31 +1,3 @@
-"""Tests for the production model integration fix (Sept 2026 retrain).
-
-The new crowd_model.pkl / delay_model.pkl / frequency_model.pkl
-artifacts each ship ONLY their single winning model (no `models` dict
-of multiple candidates, unlike older bundles) - see
-app/ai_engine/model_bundle.py's module docstring. These tests confirm:
-
-1. Each of the 3 real .pkl files under app/ai_engine/saved_models/
-   loads successfully via the shared model_bundle loader.
-2. Each loads at most once per process (shared registry).
-3. Each bundle's `features` list is exactly the order each predictor
-   expects - see KNOWN_FEATURES / the hardcoded column lists in
-   crowd_predictor.py, delay_predictor.py, frequency_predictor.py.
-4. model_bundle.validate_feature_contract() correctly accepts the real
-   feature lists and rejects an unrecognized feature name.
-5. Loading a model bundle never reads the large source CSV datasets
-   (passenger_flow.csv.gz / train_operations.csv.gz) - those are only
-   ever read by the separate *_metrics.py dashboard-evaluation path,
-   never by the prediction hot path.
-6. AI_EAGER_WARMUP / AI_MODEL_LIGHT_MODE / WEB_CONCURRENCY keep their
-   Render-Free-safe defaults.
-
-Requires the pinned runtime dependencies (scikit-learn==1.8.0,
-xgboost==2.1.3, joblib==1.5.3 - see requirements.txt) to actually
-unpickle the real artifacts; run this inside the project's normal
-dev/CI environment (or the Docker build), not a bare interpreter
-missing those packages.
-"""
 import os
 
 import pandas as pd
@@ -54,23 +26,16 @@ EXPECTED_FEATURES = {
     ],
 }
 
-
 def _fresh_registry(monkeypatch):
-    """Isolate model_bundle's process-wide registry/counters for a test,
-    so earlier tests in the same session don't leave a cached bundle
-    behind."""
     monkeypatch.setattr(model_bundle, "_registry", {})
     monkeypatch.setattr(model_bundle, "_load_counts", {k: 0 for k in model_bundle._VALID_KEYS})
-
 
 class TestRealArtifactsExist:
     def test_all_three_pkl_files_present(self):
         missing = [key for key, path in MODEL_PATHS.items() if not os.path.exists(path)]
         assert not missing, f"Missing production model artifact(s): {missing}"
 
-
 class TestRealArtifactsLoad:
-    """1. New crowd/delay/frequency models load successfully."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_bundle_loads_and_has_required_keys(self, key, monkeypatch):
@@ -82,9 +47,7 @@ class TestRealArtifactsLoad:
         assert "features" in bundle
         assert hasattr(bundle["model"], "predict")
 
-
 class TestLoadedOncePerKey:
-    """4. Each model is loaded at most once per process."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_repeated_get_or_load_hits_cache(self, key, monkeypatch):
@@ -94,9 +57,7 @@ class TestLoadedOncePerKey:
         assert first is second
         assert model_bundle.get_load_counts()[key] == 1
 
-
 class TestFeatureOrderMatchesContract:
-    """5. Feature order exactly matches the new model contract."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_saved_feature_order(self, key, monkeypatch):
@@ -104,7 +65,6 @@ class TestFeatureOrderMatchesContract:
         bundle = model_bundle.get_or_load(key, MODEL_PATHS[key])
         assert bundle is not None
         assert bundle["features"] == EXPECTED_FEATURES[key]
-
 
 class TestFeatureContractValidation:
     def test_accepts_real_crowd_features(self):
@@ -130,11 +90,7 @@ class TestFeatureContractValidation:
                 context="test",
             )
 
-
 class TestModelLoadingSkipsLargeDatasets:
-    """14. Model initialization must not load passenger_flow.csv.gz /
-    train_operations.csv.gz / any other source dataset - only the
-    small .pkl bundle itself."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_get_or_load_never_calls_read_csv(self, key, monkeypatch):
@@ -150,10 +106,7 @@ class TestModelLoadingSkipsLargeDatasets:
         bundle = model_bundle.get_or_load(key, MODEL_PATHS[key])
         assert bundle is not None
 
-
 class TestRenderFreeMemoryDefaults:
-    """11/14/15/16 (final report items) - Render Free safe defaults
-    stay untouched by this integration."""
 
     def test_ai_eager_warmup_is_false(self):
         assert settings.AI_EAGER_WARMUP is False
@@ -164,10 +117,7 @@ class TestRenderFreeMemoryDefaults:
     def test_web_concurrency_is_one(self):
         assert settings.WEB_CONCURRENCY == 1
 
-
 class TestNewBundlesHaveNoUnusedCandidates:
-    """New production bundles ship only their winning model - there is
-    no second candidate sitting in memory to prune."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_bundle_has_no_extra_candidates(self, key, monkeypatch):
@@ -177,14 +127,7 @@ class TestNewBundlesHaveNoUnusedCandidates:
         candidates = bundle.get("models")
         assert not candidates or len(candidates) == 1
 
-
 class TestInferenceIsSingleThreaded:
-    """CPU/RAM safety: both RandomForestRegressor and XGBRegressor are
-    saved with n_jobs=-1 (trained-time default) - model_bundle must
-    pin this to n_jobs=1 right after loading, so a single-row
-    prediction never spins up a host-wide thread pool on this
-    WEB_CONCURRENCY=1 instance. This must hold for the REAL loaded
-    model, not just a synthetic stand-in."""
 
     @pytest.mark.parametrize("key", ["crowd", "delay", "frequency"])
     def test_loaded_model_n_jobs_pinned_to_one(self, key, monkeypatch):
@@ -207,13 +150,10 @@ class TestInferenceIsSingleThreaded:
             pass
 
         est = _NoNJobs()
-        model_bundle._pin_inference_threads(est)  # must not raise
+        model_bundle._pin_inference_threads(est)  
         assert not hasattr(est, "n_jobs")
 
-
 class TestEndToEndPredictionsSucceed:
-    """6/7/8. A normal crowd/delay/frequency prediction succeeds against
-    the real artifacts and keeps the existing response shape."""
 
     def test_predict_crowd(self, monkeypatch):
         _fresh_registry(monkeypatch)

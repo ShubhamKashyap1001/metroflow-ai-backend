@@ -14,15 +14,6 @@ class RidershipByLineRow(BaseModel):
     passenger_count: int
 
 class PassengerFlowOverview(BaseModel):
-    """Powers the "Passenger Flow by Station" chart, the four KPI cards
-    (Total Inflow / Total Outflow / Net Flow / Avg Predicted Occupancy)
-    and the "Ridership by Line" donut on the Analytics page.
-
-    `window_hours` is a float (not int) so callers can ask for a short,
-    visibly-live rolling window (e.g. 0.5 = last 30 minutes) instead of
-    only whole-hour windows - see analytics_service.passenger_flow_overview
-    for why a short window matters here.
-    """
 
     window_hours: float
     total_inflow: int
@@ -32,3 +23,23 @@ class PassengerFlowOverview(BaseModel):
     top_stations: list[PassengerFlowStationRow]
     ridership_by_line: list[RidershipByLineRow]
     generated_at: datetime
+
+class PassengerTravelPrediction(BaseModel):
+    id: int
+    station_id: int
+    prediction_type: str
+    predicted_value: float
+    target_datetime: datetime | None
+    created_at: datetime
+
+class PublicTravelAdvisory(BaseModel):
+    id: int
+    station_id: int
+    alert_type: str
+    message: str
+    available_until: datetime | None
+    created_at: datetime
+
+class PassengerTravelUpdates(BaseModel):
+    predictions: list[PassengerTravelPrediction]
+    advisories: list[PublicTravelAdvisory]

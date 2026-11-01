@@ -12,11 +12,7 @@ class TrainScheduleCreate(BaseModel):
     arrival_time: time
     departure_time: time
     platform_number: int
-    # Position of this station in the train's route (1 = first stop,
-    # 2 = second, ...). Optional on create since not every caller
-    # knows the full route up front, but strongly recommended: without
-    # it, "next stop" resolution in get_upcoming_schedules() can't
-    # place this station relative to the train's other stops.
+
     station_sequence: int | None = None
     day_type: DayType = DayType.WEEKDAY
     is_peak_hour: bool = False
@@ -33,12 +29,10 @@ class TrainScheduleUpdate(BaseModel):
     status: ScheduleStatus | None = None
 
 class DelayUpdate(BaseModel):
-    """Payload for the delay-handling workflow."""
     delay_minutes: int
     reason: str | None = None
 
 class FrequencyAdjustment(BaseModel):
-    """Payload for manually adjusting train frequency for a station/line slot."""
     frequency_minutes: int
     is_peak_hour: bool | None = None
 

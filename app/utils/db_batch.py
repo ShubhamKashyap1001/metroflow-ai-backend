@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 
 DEFAULT_RETENTION_BATCH_SIZE = 5000
 
-
 def batched_delete(
     db: Session,
     model,
@@ -12,9 +11,6 @@ def batched_delete(
     filter_clause,
     batch_size: int = DEFAULT_RETENTION_BATCH_SIZE,
 ) -> int:
-    """Delete every row of `model` matching `filter_clause`, one
-    bounded batch (and one commit) at a time. Returns the total number
-    of rows deleted across all batches."""
     total = 0
     while True:
         batch_ids = (
@@ -34,7 +30,6 @@ def batched_delete(
         db.commit()
         total += deleted
         if len(ids) < batch_size:
-            # Fewer than a full batch came back - this was the last
-            # one, no need to run another (now-empty) query.
+
             break
     return total

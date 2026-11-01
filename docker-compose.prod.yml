@@ -1,12 +1,5 @@
 version: "3.9"
 
-# Used on the EC2 host. Unlike docker-compose.yml (local dev, builds
-# the image from source), this pulls the image the CI/CD pipeline
-# already built and pushed to Docker Hub — set DOCKERHUB_IMAGE in the
-# EC2 box's .env (e.g. yourusername/metroflow-backend:latest). Docker
-# Hub instead of ECR keeps image storage free with no size cap.
-# Run with:
-#   docker compose -f docker-compose.prod.yml up -d
 
 services:
   db:

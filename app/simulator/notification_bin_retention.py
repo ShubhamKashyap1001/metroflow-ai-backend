@@ -12,29 +12,12 @@ from app.utils.db_batch import batched_delete
 
 logger = logging.getLogger(__name__)
 
-
 def _bin_cutoff() -> datetime:
     return datetime.now(timezone.utc) - timedelta(
         hours=settings.NOTIFICATION_BIN_RETENTION_HOURS
     )
 
-
 def run_retention_once(db: Session) -> dict:
-    """One pass: hard-delete every binned notification older than
-    NOTIFICATION_BIN_RETENTION_HOURS. Synchronous - callers running on
-    the event loop should wrap this in asyncio.to_thread (see
-    run_forever below).
-
-    Batched (see app/utils/db_batch.py) instead of one unbounded
-    `query.filter(...).delete()`: a busy broadcast day (see
-    notification_service.py) can bin thousands of rows in one "mark
-    all as read" sweep, and this job runs every
-    NOTIFICATION_BIN_RETENTION_INTERVAL_SECONDS (5 min by default) -
-    an unbatched delete would hold locks against the whole matching
-    set for as long as removing it takes, on a table other requests
-    (list_notifications, mark_read, mark_all_read) are actively
-    reading/writing at the same time.
-    """
     deleted = batched_delete(
         db,
         Notification,
@@ -46,7 +29,6 @@ def run_retention_once(db: Session) -> dict:
     if deleted:
         logger.info("[notification_bin_retention] %s", stats)
     return stats
-
 
 async def run_forever(session_factory, interval_seconds: int | None = None) -> None:
     interval = interval_seconds or settings.NOTIFICATION_BIN_RETENTION_INTERVAL_SECONDS
@@ -60,10 +42,7 @@ async def run_forever(session_factory, interval_seconds: int | None = None) -> N
                 exc,
                 exc_info=exc,
             )
-            # Explicit rollback before close - see csv_replay_simulator.
-            # py's run_forever / retention.py's run_forever for why: a
-            # failed delete+commit must not leave anything half-applied
-            # on the session before it goes back to the pool.
+
             db.rollback()
         finally:
             db.close()

@@ -1,16 +1,3 @@
-"""Auth is fully delegated to Supabase now.
-
-The frontend calls `supabase.auth.signInWithPassword()` /
-`supabase.auth.signUp()` directly and gets back a Supabase-issued
-JWT. This backend never sees a password - it only ever verifies the
-JWT Supabase already issued, then looks up (or lazily creates) the
-matching row in `user_profiles` for role-based access control.
-
-Supports both Supabase JWT signing modes:
-  - Legacy HS256 shared secret (set SUPABASE_JWT_SECRET in .env)
-  - Newer asymmetric signing keys, verified via the project's JWKS
-    endpoint (used automatically if SUPABASE_JWT_SECRET is empty)
-"""
 import json
 import time
 import urllib.request
@@ -35,14 +22,6 @@ _jwks_cache_at: float = 0.0
 _JWKS_TTL = settings.JWKS_CACHE_TTL_SECONDS
 
 def _fetch_jwks(force: bool = False) -> dict:
-    """TTL-cached (JWKS_CACHE_TTL_SECONDS), not cached forever. A plain
-    @lru_cache(maxsize=1) here would never expire, so a Supabase
-    signing-key rotation would silently never be picked up without
-    restarting the whole process - every subsequent token signed with
-    the new key would fail to verify against the old cached JWKS
-    forever. `force=True` (used below when a token's `kid` isn't in the
-    cached set) lets a rotation be picked up immediately instead of
-    waiting out the TTL, without giving up caching for the common case."""
     global _jwks_cache, _jwks_cache_at
     now = time.monotonic()
     if not force and _jwks_cache is not None and (now - _jwks_cache_at) < settings.JWKS_CACHE_TTL_SECONDS:
@@ -54,15 +33,6 @@ def _fetch_jwks(force: bool = False) -> dict:
     return _jwks_cache
 
 def _select_jwk(token: str) -> dict | list:
-    """Pick the one JWK matching this token's `kid` header instead of
-    handing jose the whole JWKS (every key). jose has to construct a
-    cryptography key object to attempt verification with, and does
-    that per key it tries - handing it just the one matching key means
-    exactly one key construction per request instead of one per key in
-    the set. Falls back to the full JWKS if the token has no `kid` or
-    it isn't found (after one forced re-fetch, in case of an
-    in-flight key rotation) - same behavior as before, just not the
-    fast path."""
     jwks = _fetch_jwks()
     unverified_kid = jwt.get_unverified_header(token).get("kid")
     if not unverified_kid:
@@ -122,12 +92,6 @@ def _serialize_profile(u: UserProfile) -> dict:
     return {field: getattr(u, field) for field in _PROFILE_FIELDS}
 
 def _hydrate_profile(d: dict) -> UserProfile:
-    """Rebuild a (detached, not session-bound) UserProfile from a
-    cached dict, skipping the DB lookup entirely on a cache hit. `id`
-    and `role` are reconstructed as the real uuid.UUID/UserRole types
-    (not left as plain strings) since a couple of call sites compare
-    current_user.id/.role directly (see app/api/v1/users.py) and rely
-    on that."""
     return UserProfile(
         id=uuid.UUID(d["id"]) if isinstance(d["id"], str) else d["id"],
         email=d["email"],
@@ -140,16 +104,9 @@ def _hydrate_profile(d: dict) -> UserProfile:
     )
 
 def invalidate_user_cache(user_id: uuid.UUID) -> None:
-    """Call after any write to a UserProfile row (role/is_active/name/
-    etc. change) so the next request doesn't keep serving the cached
-    pre-update version for up to AUTH_USER_CACHE_TTL_SECONDS."""
     cache.delete(_profile_cache_key(user_id))
 
 def _get_or_create_profile_by_email(db: Session, email: str) -> UserProfile:
-    """TEMPORARY dev bypass (settings.dev_auth_bypass_enabled, i.e.
-    AUTH_DISABLED=True AND DEBUG=True): no Supabase token to read a
-    `sub` UUID from, so derive a stable UUID from the email itself -
-    the same email always maps to the same profile row."""
     email = email.strip().lower()
     user_id = uuid.uuid5(uuid.NAMESPACE_DNS, email)
 
@@ -173,13 +130,6 @@ def _get_or_create_profile_by_email(db: Session, email: str) -> UserProfile:
     return user
 
 def _get_or_create_profile(db: Session, payload: dict) -> UserProfile:
-    """First request after a Supabase sign-up: create the matching
-    user_profiles row. Every request after that just reads it - or,
-    within AUTH_USER_CACHE_TTL_SECONDS of the last request, reads it
-    from Redis instead of touching the DB at all. This runs on EVERY
-    authenticated request (it's what get_current_user calls), so
-    avoiding a repeated user_profiles lookup here matters a lot more
-    than most other caching in the app."""
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing subject claim")
@@ -227,13 +177,6 @@ def _get_or_create_profile(db: Session, payload: dict) -> UserProfile:
     return user
 
 def get_user_from_token_optional(token: str | None, db: Session) -> UserProfile | None:
-    """Like get_current_user, but for the WebSocket handshake: browsers
-    can't set an Authorization header on a WS upgrade, so the token
-    (when present) arrives as a ?token= query param instead of via
-    oauth2_scheme, and a missing/invalid token should degrade to an
-    anonymous (broadcast-only) connection rather than reject the
-    upgrade outright - most of the app's existing WS usage (crowd/
-    train updates) is intentionally public. Never raises."""
     if not token:
         return None
     try:
@@ -276,10 +219,6 @@ def get_current_user(
     return user
 
 def require_roles(*roles: UserRole):
-    """Dependency factory for role-based access control.
-
-    Usage: Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR))
-    """
 
     def _dependency(current_user: UserProfile = Depends(get_current_user)) -> UserProfile:
         if current_user.role not in roles:

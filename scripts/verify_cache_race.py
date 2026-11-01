@@ -1,11 +1,3 @@
-"""Stress-test app/core/cache.py's shared global _client under real
-concurrent multi-thread access WHILE Redis flaps up/down repeatedly -
-exactly the "Redis under concurrent load" scenario. Looks for races in
-the unlocked read of `_client` in _get_client() and the fully unlocked
-_mark_down(), which can otherwise let one thread hand out a client
-object that a concurrently-running _mark_down() on another thread is
-simultaneously invalidating/closing.
-"""
 import os, subprocess, sys, threading, time
 
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
@@ -52,7 +44,6 @@ time.sleep(6.0)
 stop.set()
 for th in threads: th.join(timeout=5)
 
-# make sure redis is actually back up for anything after this
 subprocess.Popen(["redis-server", "--daemonize", "yes", "--port", "6379"])
 time.sleep(1.0)
 

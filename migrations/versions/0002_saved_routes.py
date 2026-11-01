@@ -1,6 +1,3 @@
-"""Add saved_routes table - a user's saved "daily route" for the home
-page personalization widget (app/models/saved_route.py).
-"""
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -10,7 +7,6 @@ revision: str = "0002_saved_routes"
 down_revision: Union[str, None] = "0001_baseline_schema"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
-
 
 def upgrade() -> None:
     bind = op.get_bind()
@@ -31,7 +27,6 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
             sa.UniqueConstraint("user_id", name="ux_saved_routes_user_id"),
         )
-
 
 def downgrade() -> None:
     bind = op.get_bind()

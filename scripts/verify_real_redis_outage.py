@@ -1,10 +1,3 @@
-"""Real Redis process kill/restart mid-load, not a simulated bus.
-Two ConnectionManagers (two simulated workers) against a REAL local
-redis-server that we actually kill (SIGKILL via `redis-cli shutdown
-nosave`) and restart while publishing continuously. Checks: does the
-relay recover on its own, and are messages sent *after* recovery
-delivered without duplication?
-"""
 import asyncio, json, os, subprocess, sys, time, threading
 
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
@@ -50,7 +43,7 @@ async def run():
     await asyncio.sleep(3.0)
     print("--- restarting redis-server ---")
     subprocess.Popen(["redis-server", "--daemonize", "yes", "--port", "6379"])
-    # wait for it to actually come up
+
     for _ in range(50):
         try:
             c = cache._build_client(); c.ping(); break
@@ -60,7 +53,7 @@ async def run():
     await asyncio.sleep(5.0)
     stop_flag.set()
     pub_thread.join()
-    await asyncio.sleep(2.0)  # drain
+    await asyncio.sleep(2.0)  
 
     markers_a = [m["data"]["event_marker"] for m in tabA.received if "event_marker" in m.get("data", {})]
     markers_b = [m["data"]["event_marker"] for m in tabB.received if "event_marker" in m.get("data", {})]
@@ -71,9 +64,6 @@ async def run():
     print(f"tabB (cross-process via relay): {len(markers_b)} received, {dup_b} duplicates")
     print(f"total published: {counter['i']}")
 
-    # tabA is LOCAL to the publishing worker - it must receive
-    # every single one, outage or not (local delivery never depends
-    # on Redis).
     missing_a = counter["i"] - len(set(markers_a))
     ok = True
     if missing_a != 0:
@@ -82,10 +72,7 @@ async def run():
     if dup_a or dup_b:
         print("[FAIL] duplicate deliveries found")
         ok = False
-    # tabB necessarily misses whatever was published during the outage
-    # window (pub/sub can't replay) - that's expected, not a bug -
-    # but it MUST resume receiving live events after recovery with no
-    # duplicates, which the checks above already establish.
+
     late_b = [m for m in markers_b if int(m[1:]) > counter["i"] - 30]
     if not late_b:
         print("[FAIL] tabB received nothing near the end - relay did not recover")

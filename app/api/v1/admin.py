@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
 from app.core import cache, log_buffer
@@ -11,15 +11,17 @@ from app.database.database import engine
 from app.database.session import SessionLocal
 from app.enums.user_role import UserRole
 from app.models.user_profile import UserProfile
+from app.schemas.admin import SimulatorSettingsUpdate
 from app.simulator.scheduler import (
     is_simulator_running,
     is_train_tracker_running,
+    pause_simulator,
+    pause_train_tracker,
+    resume_simulator,
+    resume_train_tracker,
     scheduler_status,
-    start_simulator,
-    start_train_tracker,
-    stop_simulator,
-    stop_train_tracker,
 )
+from app.simulator.control import control_coordination, get_runtime_control, update_runtime_control
 from app.websocket.manager import manager
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -29,12 +31,23 @@ async def simulator_status(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     return {
-                                                                   
         "crowd_simulator_running": is_simulator_running(),
         "train_tracker_running": is_train_tracker_running(),
-                                                                          
+        "control": get_runtime_control(),
+        "coordination": control_coordination(),
         "detail": scheduler_status(),
     }
+
+@router.patch("/simulator/settings")
+@limiter.limit(ADMIN_LIMIT)
+async def simulator_settings(
+    request: Request,
+    payload: SimulatorSettingsUpdate,
+    current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    control = update_runtime_control(**changes)
+    return {"control": control, "coordination": control_coordination()}
 
 @router.post("/simulator/start")
 @limiter.limit(ADMIN_LIMIT)
@@ -42,7 +55,9 @@ async def simulator_start(
     request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    start_simulator(SessionLocal, settings.SIMULATOR_INTERVAL_SECONDS)
+    if not settings.ENABLE_SIMULATOR:
+        raise HTTPException(status_code=409, detail="Crowd simulator is disabled by deployment configuration.")
+    resume_simulator(SessionLocal, settings.SIMULATOR_INTERVAL_SECONDS)
     return {"crowd_simulator_running": is_simulator_running()}
 
 @router.post("/simulator/stop")
@@ -51,7 +66,7 @@ async def simulator_stop(
     request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    await stop_simulator()
+    pause_simulator()
     return {"crowd_simulator_running": is_simulator_running()}
 
 @router.post("/train-tracker/start")
@@ -60,7 +75,9 @@ async def train_tracker_start(
     request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    start_train_tracker(SessionLocal, settings.TRAIN_TRACK_INTERVAL_SECONDS)
+    if not settings.ENABLE_TRAIN_TRACKING:
+        raise HTTPException(status_code=409, detail="Train tracker is disabled by deployment configuration.")
+    resume_train_tracker(SessionLocal, settings.TRAIN_TRACK_INTERVAL_SECONDS)
     return {"train_tracker_running": is_train_tracker_running()}
 
 @router.post("/train-tracker/stop")
@@ -69,7 +86,7 @@ async def train_tracker_stop(
     request: Request,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    await stop_train_tracker()
+    pause_train_tracker()
     return {"train_tracker_running": is_train_tracker_running()}
 
 @router.get("/logs")
@@ -78,9 +95,6 @@ async def get_logs(
     level: str | None = None,
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    """Recent real application log records (in-process ring buffer -
-    see app/core/log_buffer.py). Not synthetic - this is exactly what
-    the running server has logged, newest first."""
     return {
         "logs": log_buffer.get_recent_logs(limit=min(max(limit, 1), 500), level=level),
         "counts": log_buffer.log_counts(),
@@ -90,9 +104,6 @@ async def get_logs(
 async def system_status(
     current_user: UserProfile = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
-    """One combined snapshot for a System Status screen: DB, cache,
-    background workers, and live socket connections - all read live
-    from the running process, not cached/mocked."""
     db_ok = True
     try:
         with engine.connect() as conn:
@@ -108,6 +119,10 @@ async def system_status(
         "crowd_simulator_running": is_simulator_running(),
         "train_tracker_running": is_train_tracker_running(),
         "scheduler": scheduler_status(),
+        "simulator_control": {
+            **get_runtime_control(),
+            "coordination": control_coordination(),
+        },
         "websocket_connections": len(manager.active_connections),
         "log_counts": log_buffer.log_counts(),
         "timestamp": datetime.now(timezone.utc),

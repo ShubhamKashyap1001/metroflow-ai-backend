@@ -1,25 +1,3 @@
-"""One-off migration for the `notification_read_states` table (see
-app/models/notification_read_state.py) gaining two new columns -
-`binned_at` and `deleted_at` - and `read_at` becoming nullable, so a
-row can represent "binned"/"deleted" without necessarily being "read"
-too.
-
-This project doesn't use Alembic - app/database/init_db.py just calls
-Base.metadata.create_all(), which only creates tables that don't exist
-yet and never alters an existing one. If you already ran init_db.py
-(or the prior notification_read_states migration) before this update,
-run this once:
-
-    cd backend
-    venv\\Scripts\\activate      (Windows)   or   source venv/bin/activate   (macOS/Linux)
-    python -m app.database.migrate_notification_read_state_columns
-
-Safe to run more than once - every statement is IF NOT EXISTS / uses
-DROP NOT NULL, which is a no-op if already nullable. Existing rows get
-binned_at = NULL and deleted_at = NULL, i.e. "not binned, not deleted"
-- behaviourally identical to before this migration for anything that
-was already marked read.
-"""
 from sqlalchemy import text
 
 from app.core.config import settings

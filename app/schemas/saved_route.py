@@ -6,11 +6,9 @@ from pydantic import ConfigDict
 from app.enums.crowd_level import CrowdLevel
 from app.enums.schedule_status import ScheduleStatus
 
-
 class SavedRouteCreate(BaseModel):
     origin_station_id: int
     destination_station_id: int
-
 
 class SavedRouteResponse(BaseModel):
     id: int
@@ -20,7 +18,6 @@ class SavedRouteResponse(BaseModel):
     destination_station_name: str
     model_config = ConfigDict(from_attributes=True)
 
-
 class NextDeparture(BaseModel):
     train_id: int
     platform_number: int
@@ -29,7 +26,6 @@ class NextDeparture(BaseModel):
     status: ScheduleStatus
     delay_minutes: int
     matches_destination: bool
-
 
 class SavedRouteLiveStatus(BaseModel):
     origin_station_id: int

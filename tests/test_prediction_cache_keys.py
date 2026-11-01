@@ -7,14 +7,7 @@ import pytest
 
 from app.services import prediction_service
 
-
 class _FakeRedisCache:
-    """Minimal in-memory stand-in for app/core/cache.py's get_json/
-    set_json, round-tripping through json.dumps/loads exactly like the
-    real Redis-backed cache does (including datetime -> str via
-    `default=str`, then back via `datetime.fromisoformat` in
-    `_cached_prediction`), so these tests exercise the real
-    serialisation path, not just the in-memory dict."""
 
     def __init__(self):
         self.store: dict[str, str] = {}
@@ -28,14 +21,12 @@ class _FakeRedisCache:
     def set_json(self, key, value, ttl_seconds=None):
         self.store[key] = json.dumps(value, default=str)
 
-
 @pytest.fixture
 def fake_cache(monkeypatch):
     fake = _FakeRedisCache()
     monkeypatch.setattr(prediction_service.cache, "get_json", fake.get_json)
     monkeypatch.setattr(prediction_service.cache, "set_json", fake.set_json)
     return fake
-
 
 def _crowd_result(target_datetime):
     return {
@@ -47,7 +38,6 @@ def _crowd_result(target_datetime):
         "models": {},
     }
 
-
 def _delay_result(target_datetime):
     return {
         "station_id": 1,
@@ -57,7 +47,6 @@ def _delay_result(target_datetime):
         "model_version": "random_forest_v1",
         "models": {},
     }
-
 
 def _frequency_result(target_datetime):
     return {
@@ -69,21 +58,14 @@ def _frequency_result(target_datetime):
         "models": {},
     }
 
-
-# --- _cache_key_bucket (pure) ------------------------------------------------
-
 def test_cache_key_bucket_floors_to_the_hour():
     dt = datetime(2026, 3, 4, 14, 37, 52, 123456)
     assert prediction_service._cache_key_bucket(dt) == datetime(2026, 3, 4, 14, 0, 0, 0).isoformat()
-
 
 def test_cache_key_bucket_distinguishes_different_hours():
     a = prediction_service._cache_key_bucket(datetime(2026, 3, 4, 14, 59, 59, 999999))
     b = prediction_service._cache_key_bucket(datetime(2026, 3, 4, 15, 0, 0, 0))
     assert a != b
-
-
-# --- _cached_predict_crowd ----------------------------------------------------
 
 def test_predict_crowd_same_hour_is_a_cache_hit_not_a_recompute(fake_cache, monkeypatch):
     calls = []
@@ -95,14 +77,13 @@ def test_predict_crowd_same_hour_is_a_cache_hit_not_a_recompute(fake_cache, monk
     monkeypatch.setattr(prediction_service, "predict_crowd", fake_predict_crowd)
 
     t1 = datetime(2026, 3, 4, 14, 7, 23, 123456)
-    t2 = datetime(2026, 3, 4, 14, 52, 59, 987654)  # same hour, different minute/sec/us
+    t2 = datetime(2026, 3, 4, 14, 52, 59, 987654)  
 
     first = prediction_service._cached_predict_crowd(1, t1)
     second = prediction_service._cached_predict_crowd(1, t2)
 
     assert len(calls) == 1, "second same-hour call should have been served from cache, not recomputed"
     assert second["predicted_count"] == first["predicted_count"]
-
 
 def test_predict_crowd_different_hour_is_a_genuine_cache_miss(fake_cache, monkeypatch):
     calls = []
@@ -114,18 +95,14 @@ def test_predict_crowd_different_hour_is_a_genuine_cache_miss(fake_cache, monkey
     monkeypatch.setattr(prediction_service, "predict_crowd", fake_predict_crowd)
 
     t1 = datetime(2026, 3, 4, 14, 7, 23)
-    t2 = datetime(2026, 3, 4, 15, 7, 23)  # different hour
+    t2 = datetime(2026, 3, 4, 15, 7, 23)  
 
     prediction_service._cached_predict_crowd(1, t1)
     prediction_service._cached_predict_crowd(1, t2)
 
     assert len(calls) == 2, "a genuinely different target hour must not be served from the wrong cache entry"
 
-
 def test_predict_crowd_light_flag_kept_as_a_separate_cache_entry(fake_cache, monkeypatch):
-    """light=True (simulator-style call, no confidence pass) and
-    light=False (real API call) must never share a cache entry - they
-    return differently-shaped results."""
     calls = []
 
     def fake_predict_crowd(station_id, target_datetime, light=False):
@@ -139,9 +116,6 @@ def test_predict_crowd_light_flag_kept_as_a_separate_cache_entry(fake_cache, mon
     prediction_service._cached_predict_crowd(1, t, light=True)
 
     assert calls == [False, True]
-
-
-# --- _cached_predict_delay ----------------------------------------------------
 
 def test_predict_delay_same_hour_is_a_cache_hit(fake_cache, monkeypatch):
     calls = []
@@ -161,7 +135,6 @@ def test_predict_delay_same_hour_is_a_cache_hit(fake_cache, monkeypatch):
 
     assert len(calls) == 1
 
-
 def test_predict_delay_different_train_id_is_not_conflated(fake_cache, monkeypatch):
     calls = []
 
@@ -177,9 +150,6 @@ def test_predict_delay_different_train_id_is_not_conflated(fake_cache, monkeypat
     prediction_service._cached_predict_delay(db, 1, t, train_id=8)
 
     assert calls == [7, 8]
-
-
-# --- _cached_recommend_frequency ----------------------------------------------
 
 def test_recommend_frequency_same_hour_is_a_cache_hit(fake_cache, monkeypatch):
     calls = []
@@ -198,14 +168,7 @@ def test_recommend_frequency_same_hour_is_a_cache_hit(fake_cache, monkeypatch):
 
     assert len(calls) == 1
 
-
-# --- smart_recommendations (integration through the fixed wrappers) ----------
-
 def test_smart_recommendations_reuses_cache_across_calls_in_the_same_hour(fake_cache, monkeypatch):
-    """Simulates the AI Insights panel refreshing on a live WebSocket
-    event a few seconds after the previous refresh (same wall-clock
-    hour): the underlying crowd/delay/frequency models must each run
-    at most once, not once per refresh."""
     crowd_calls = []
     delay_calls = []
     freq_calls = []
@@ -231,7 +194,7 @@ def test_smart_recommendations_reuses_cache_across_calls_in_the_same_hour(fake_c
     class _FixedHourDatetime(datetime):
         _sequence = [
             datetime(2026, 3, 4, 11, 2, 0),
-            datetime(2026, 3, 4, 11, 9, 45),  # same hour as above, a few minutes later
+            datetime(2026, 3, 4, 11, 9, 45),  
         ]
         _i = 0
 

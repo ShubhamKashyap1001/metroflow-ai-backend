@@ -1,12 +1,3 @@
-"""Passenger Enquiry module.
-
-A passenger raises an enquiry (a support question / complaint /
-lost-and-found report / suggestion, etc.). It starts life as OPEN.
-An admin or operator can pick it up (IN_PROGRESS) and, once handled,
-resolve it (RESOLVED) with a reply the passenger can read back on
-their "My Enquiries" list - mirroring the Alert module's
-raise -> resolve workflow, but scoped per-user instead of broadcast.
-"""
 from datetime import datetime
 
 from sqlalchemy import DateTime
@@ -30,14 +21,6 @@ class Enquiry(TimestampMixin, Base):
 
     __tablename__ = "enquiries"
 
-    # BUGFIX (expensive analytics/user/enquiry queries): this table had
-    # NO indexes at all beyond the primary key. enquiry_service.py's
-    # list_enquiries() is hit on every "My Enquiries" page load (filtered
-    # by user_id, ordered by created_at) and every admin "manage
-    # enquiries" queue load (no filter, ordered by created_at), and
-    # get_enquiry_stats() groups by status for the same user_id filter -
-    # every one of those was a full Seq Scan of the whole enquiries
-    # table, getting linearly slower as more enquiries pile up.
     __table_args__ = (
         Index("ix_enquiries_user_id_created_at", "user_id", "created_at"),
         Index("ix_enquiries_status", "status"),

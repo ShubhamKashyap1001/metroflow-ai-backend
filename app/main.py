@@ -30,6 +30,7 @@ from app.api.v1 import (
     crowd,
     enquiries,
     health,
+    integrations,
     meta,
     news,
     notifications,
@@ -52,6 +53,8 @@ from app.simulator.scheduler import (
     start_simulator,
     start_train_tracker,
     stop_notification_bin_retention_job,
+    start_report_scheduler,
+    stop_report_scheduler,
     stop_retention_job,
     stop_simulator,
     stop_train_tracker,
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI):
         start_notification_bin_retention_job(
             SessionLocal, settings.NOTIFICATION_BIN_RETENTION_INTERVAL_SECONDS
         )
+    if settings.ENABLE_REPORT_SCHEDULER:
+        start_report_scheduler(SessionLocal, settings.REPORT_SCHEDULER_INTERVAL_SECONDS)
     yield
     if settings.ENABLE_SIMULATOR:
         await stop_simulator()
@@ -94,6 +99,8 @@ async def lifespan(app: FastAPI):
         await stop_retention_job()
     if settings.ENABLE_NOTIFICATION_BIN_RETENTION_JOB:
         await stop_notification_bin_retention_job()
+    if settings.ENABLE_REPORT_SCHEDULER:
+        await stop_report_scheduler()
     manager.stop_relay()
     await manager.stop_reaper()
     notification_executor.shutdown(wait=True)
@@ -113,17 +120,6 @@ async def db_pool_exhausted_handler(request: Request, exc: SATimeoutError):
     logger.error("[db] connection pool exhausted on %s - consider raising DB_POOL_SIZE/DB_MAX_OVERFLOW "
                   "or checking for a slow query/unreachable DB.", request.url.path)
     metrics.record_db_failure("pool_exhausted")
-
-    # Deliberately NOT writing a "pool exhausted" notification to the DB
-    # here. Opening `SessionLocal()` to record this would try to check
-    # out yet another connection from the exact pool that has none free
-    # - that checkout attempt blocks for the full DB_POOL_TIMEOUT again
-    # (turning what should be an immediate 503 into one that hangs for
-    # ~DB_POOL_TIMEOUT seconds first), and under a burst of these errors
-    # every handler instance competing for the same scarce connections
-    # makes the exhaustion worse instead of just reporting it. The
-    # logger.error + metrics counter above are DB-free and already
-    # sufficient for alerting on this condition.
 
     return JSONResponse(
         status_code=503,
@@ -187,6 +183,7 @@ def metrics_endpoint():
 API_PREFIX = "/api/v1"
 
 app.include_router(health.router, prefix=API_PREFIX)
+app.include_router(integrations.router, prefix=API_PREFIX)
 app.include_router(authentication.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(station.router, prefix=API_PREFIX)

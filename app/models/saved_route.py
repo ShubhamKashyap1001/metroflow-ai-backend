@@ -1,16 +1,3 @@
-"""A user's saved "daily route" (home screen personalization).
-
-Deliberately NOT the same thing as `Journey` (app/models/journey.py) -
-Journey is a one-off active/completed check-in/check-out trip record.
-SavedRoute is a standing preference: "I take Station A -> Station B
-every day", stored once and read back on every home-page load to
-drive the personalized "your route" widget (live next-departure/ETA
-for that pair) without the user re-picking stations each time.
-
-One row per user (unique on user_id): saving a new route overwrites
-the old one (see saved_route_service.set_my_route's upsert), matching
-the product shape - a single "your daily route" card, not a list.
-"""
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import UniqueConstraint
@@ -23,7 +10,6 @@ from sqlalchemy.orm import relationship
 
 from app.database.base import Base
 from app.mixins.timestamp import TimestampMixin
-
 
 class SavedRoute(TimestampMixin, Base):
 

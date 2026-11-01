@@ -1,34 +1,4 @@
 #!/usr/bin/env python3
-"""Sustained, multi-tab soak test standing in for the manual "keep the
-dashboard open 30 minutes in several browser tabs" check, which this
-sandbox cannot literally perform (no browser/display tool, no network
-to install fastapi/redis - see docs/realtime-websocket-system.md and
-scripts/verify_leader_election.py for the same constraint).
-
-What this DOES exercise, against the real app/websocket/manager.py
-(imported unmodified, same technique as verify_ws_manager.py):
-  1. Backend data changes on a real 5-10s cadence (here: 7s) sent as
-     real crowd_update broadcasts over a real asyncio event loop, for
-     a sustained run (2 minutes = ~17 ticks) - not a single tick.
-  2. Multiple independent WebSocket connections (FakeWebSocket
-     standing in for browser tabs, each with its own send_text()
-     buffer) all receive every tick - the offline equivalent of
-     "multiple tabs update".
-  3. A worker restart mid-run: the "leader" ConnectionManager instance
-     is torn down and a fresh one takes over (new LeaderElection-style
-     handoff), verifying ticks resume without gaps or dupes.
-  4. A single tab's socket drops and reconnects mid-run (simulating a
-     laptop sleep/network blip), verifying it doesn't receive
-     duplicates and does receive every subsequent tick once
-     reconnected - i.e. no data loss or double-delivery, matching the
-     frontend's own resync-on-reconnect design (LiveSocketProvider.tsx).
-
-What this does NOT verify: the real browser DOM actually re-rendering
-without a location.reload() (that was verified by reading
-LiveStationsPanel.tsx / LiveSocketProvider.tsx's source - no reload()
-or router.refresh() call exists in that path), and the real
-fastapi/redis wire protocol (see verify_ws_manager.py's own caveat).
-"""
 import asyncio
 import importlib
 import json
@@ -41,17 +11,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-TICK_SECONDS = 7          # within the required 5-10s cadence
-NUM_TICKS = 17            # ~2 minutes of sustained ticks
+TICK_SECONDS = 7          
+NUM_TICKS = 17            
 NUM_TABS = 3
-RESTART_AFTER_TICK = 7    # mid-run worker restart
-TAB_DROP_AFTER_TICK = 4   # mid-run single-tab reconnect
-TAB_DROP_TICKS = 2        # how many ticks that tab stays disconnected
+RESTART_AFTER_TICK = 7    
+TAB_DROP_AFTER_TICK = 4   
+TAB_DROP_TICKS = 2        
 
-
-# ---------------------------------------------------------------------------
-# Fake fastapi / redis, identical technique to verify_ws_manager.py
-# ---------------------------------------------------------------------------
 class FakeWebSocket:
     def __init__(self, name):
         self.name = name
@@ -67,7 +33,6 @@ class FakeWebSocket:
             raise ConnectionResetError("simulated drop")
         self.sent.append(payload)
 
-
 fake_fastapi = types.ModuleType("fastapi")
 fake_fastapi.WebSocket = FakeWebSocket
 sys.modules["fastapi"] = fake_fastapi
@@ -78,7 +43,6 @@ core_pkg = types.ModuleType("app.core")
 core_pkg.__path__ = []
 sys.modules.setdefault("app", app_pkg)
 sys.modules.setdefault("app.core", core_pkg)
-
 
 class FakeBus:
     def __init__(self):
@@ -92,7 +56,6 @@ class FakeBus:
 
     def _register(self, channel, pubsub):
         self._subscribers.setdefault(channel, []).append(pubsub)
-
 
 class FakePubSub:
     def __init__(self, bus):
@@ -113,7 +76,6 @@ class FakePubSub:
     def close(self):
         pass
 
-
 class FakeRedisClient:
     def __init__(self, bus):
         self.bus = bus
@@ -123,7 +85,6 @@ class FakeRedisClient:
 
     def pubsub(self):
         return FakePubSub(self.bus)
-
 
 def fresh_manager_module(bus):
     for name in ("app.websocket.manager", "app.websocket.events", "app.websocket", "app.core.cache"):
@@ -136,7 +97,6 @@ def fresh_manager_module(bus):
     ws_pkg.__path__ = [str(REPO_ROOT / "app" / "websocket")]
     sys.modules["app.websocket"] = ws_pkg
     return importlib.import_module("app.websocket.manager")
-
 
 class LoopThread:
     def __init__(self):
@@ -151,14 +111,11 @@ class LoopThread:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2)
 
-
 results = []
-
 
 def check(label, ok):
     results.append((label, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'} - {label}")
-
 
 def main():
     bus = FakeBus()
@@ -181,10 +138,7 @@ def main():
     current_manager = manager
 
     for tick in range(1, NUM_TICKS + 1):
-        # Mid-run worker restart: tear down current manager's connections
-        # and hand off to a brand-new ConnectionManager instance sharing
-        # the same relay bus - the offline stand-in for a crashed
-        # process being replaced by the next LeaderElection winner.
+
         if tick == RESTART_AFTER_TICK:
             print(f"[soak] t={time.monotonic()-start:.1f}s: simulating worker "
                   f"restart (new ConnectionManager instance, same relay bus)")
@@ -194,7 +148,6 @@ def main():
                 lt.run(new_mgr.connect(ws))
             current_manager = new_mgr
 
-        # Mid-run single-tab drop + reconnect (laptop sleep / network blip).
         if tick == TAB_DROP_AFTER_TICK:
             dropped_tab = "tab1"
             tabs[dropped_tab].alive = False
@@ -225,14 +178,7 @@ def main():
                 received_ts.append(msg["data"]["timestamp"])
         dupes = len(received_ts) - len(set(received_ts))
         if name == "tab1":
-            # tab1 was disconnected during the tick-4 broadcast (missed
-            # outright - the send simply failed) and also during
-            # tick-5's broadcast, BUT manager.connect()'s resync
-            # (_send_latest_state) delivers the latest cached state the
-            # instant it reconnects - which by then is tick-5's payload
-            # - so tick-5 is correctly recovered via resync rather than
-            # genuinely lost. Only tick-4 (superseded by tick-5 before
-            # reconnect ever happened) is expected to be truly missed.
+
             missed = tick_ids_expected - set(received_ts)
             expected_missed = {f"tick-{TAB_DROP_AFTER_TICK}"}
             ok = dupes == 0 and missed == expected_missed
@@ -247,7 +193,6 @@ def main():
 
     print(f"\n[soak] OVERALL: {'PASS' if all_ok else 'FAIL'}")
     return 0 if all_ok else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

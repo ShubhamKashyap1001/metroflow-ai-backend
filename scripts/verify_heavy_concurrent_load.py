@@ -1,12 +1,3 @@
-"""Ad-hoc heavy-load stress test (not part of the curated verify_*.py
-suite): many simulated worker processes, many clients each, MANY
-events published concurrently and as fast as possible from multiple
-threads at once (real thread concurrency, not just asyncio
-interleaving) against a REAL local Redis relay. Looks specifically for
-duplicate, missing, and delayed deliveries under load.
-
-Requires a real Redis reachable at REDIS_URL.
-"""
 import asyncio
 import json
 import os
@@ -29,8 +20,7 @@ from app.websocket import events  # noqa: E402
 N_WORKERS = 5
 CLIENTS_PER_WORKER = 8
 EVENTS_PER_PUBLISH_THREAD = 150
-PUBLISH_THREADS_PER_WORKER = 4  # real OS threads hammering notify() concurrently
-
+PUBLISH_THREADS_PER_WORKER = 4  
 
 class FakeWebSocket:
     def __init__(self, name):
@@ -45,7 +35,6 @@ class FakeWebSocket:
         self.received.append(json.loads(payload))
         self._recv_times.append(time.monotonic())
 
-
 async def run():
     loop = asyncio.get_event_loop()
 
@@ -56,7 +45,6 @@ async def run():
         mgr.start_relay()
         workers.append(mgr)
 
-    # Let every relay thread actually subscribe before publishing.
     await asyncio.sleep(1.5)
 
     all_clients = []
@@ -67,7 +55,7 @@ async def run():
             all_clients.append(ws)
 
     total_expected = N_WORKERS * PUBLISH_THREADS_PER_WORKER * EVENTS_PER_PUBLISH_THREAD
-    send_times = {}  # event_id -> send monotonic time
+    send_times = {}  
     send_times_lock = threading.Lock()
 
     def publisher(mgr, worker_idx, thread_idx):
@@ -76,17 +64,7 @@ async def run():
             t0 = time.monotonic()
             with send_times_lock:
                 send_times[eid] = t0
-            # notify() is the sync/thread-safe entry point real service
-            # code (alert_service, notification_service, etc.) calls
-            # from FastAPI's threadpool - exactly what's being stressed
-            # here: many real OS threads, across many "processes",
-            # hammering it concurrently.
-            # STATION_ALERT is intentionally NOT one of the coalesced
-            # event types (see _COALESCE_MERGE_KEY in manager.py) - it
-            # is dispatched instantly, one WS message per notify()
-            # call, which is what per-event dup/missing/delay counting
-            # below assumes. (crowd_update/train_position are merged
-            # by design and would be the wrong event type to use here.)
+
             mgr.notify(events.STATION_ALERT, {"event_marker": eid})
 
     threads = []
@@ -101,8 +79,6 @@ async def run():
         th.join()
     t_publish_done = time.monotonic()
 
-    # Give the relay + event loop time to fully drain across every
-    # worker/client before grading.
     await asyncio.sleep(5.0)
     t_drain_done = time.monotonic()
 
@@ -127,8 +103,6 @@ async def run():
         if len(set(markers)) != total_expected:
             failures.append(f"{ws.name}: expected {total_expected} distinct events, got {len(set(markers))} (missing {total_expected - len(set(markers))})")
 
-    # Delay analysis: for each client, look at recv time vs publish
-    # time for every marker it did receive.
     for ws in all_clients:
         for m, t_recv in zip(
             [msg["data"].get("event_marker") for msg in ws.received if "event_marker" in msg.get("data", {})],
@@ -159,7 +133,6 @@ async def run():
         print("\nNo duplicate, missing, or excessively delayed events across "
               f"{len(all_clients)} clients on {N_WORKERS} simulated workers "
               f"under concurrent multi-thread publish load. PASS.")
-
 
 if __name__ == "__main__":
     asyncio.run(run())

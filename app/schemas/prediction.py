@@ -2,13 +2,14 @@ from datetime import datetime
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import model_validator
 
 from app.enums.prediction_type import PredictionType
 
 class PredictionCreate(BaseModel):
     station_id: int
     predicted_count: int | None = None
-    confidence: float = 0
+    confidence: float | None = None
     prediction_type: PredictionType = PredictionType.CROWD
     predicted_value: float = 0
     target_datetime: datetime | None = None
@@ -18,19 +19,53 @@ class PredictionResponse(BaseModel):
     id: int
     station_id: int
     predicted_count: int | None = None
-    confidence: float
+    confidence: float | None
     prediction_type: PredictionType
     predicted_value: float
     target_datetime: datetime | None = None
     model_version: str | None = None
-    # Per-candidate breakdown (currently "random_forest" and "xgboost"
-    # keys), same pattern as CrowdModelMetrics.models - lets a caller
-    # show both models side by side instead of only the winner that
-    # the flat fields above mirror. Shape varies by prediction_type
-    # (e.g. predicted_delay_minutes for delay,
-    # recommended_frequency_minutes for frequency), so this is kept
-    # loosely typed here rather than duplicating a schema per type.
+    created_at: datetime
+    data_source: str | None = None
+    inputs_summary: str | None = None
+    confidence_note: str | None = None
+
     models: dict[str, dict] = {}
+
+    @model_validator(mode="after")
+    def explain_prediction(self):
+        is_fallback = self.model_version == "heuristic_fallback"
+        if self.prediction_type in (PredictionType.CROWD, PredictionType.DEMAND):
+            self.data_source = "Calendar heuristic fallback" if is_fallback else "Trained passenger-flow model"
+            self.inputs_summary = (
+                "Local hour, weekday/weekend and peak-hour pattern; live passenger count is not used."
+                if is_fallback else
+                "Station identifier and local calendar features; current live passenger count is not an input."
+            )
+            self.confidence_note = (
+                "No calibrated model confidence is available for this heuristic."
+                if is_fallback else
+                "Agreement among model trees; an internal consistency score, not a probability of being correct."
+                if self.confidence is not None else
+                "This model does not provide a confidence score for this prediction."
+            )
+            if is_fallback:
+                self.confidence = None
+        elif self.prediction_type == PredictionType.DELAY:
+            self.data_source = "Heuristic delay estimate" if is_fallback else "Trained delay model"
+            self.inputs_summary = (
+                "Predicted passenger demand and a simple delay formula."
+                if is_fallback else
+                "Train/station context, predicted passenger demand and local calendar features; weather is a default proxy, not a live feed."
+            )
+            self.confidence = None
+            self.confidence_note = "A calibrated confidence score is not calculated for delay predictions."
+        else:
+            self.data_source = "Peak/off-peak heuristic" if is_fallback else "Trained train-frequency model"
+            self.inputs_summary = "Station identifier and local calendar/peak-hour features; current live passenger count is not an input."
+            self.confidence = None
+            self.confidence_note = "A calibrated confidence score is not calculated for frequency recommendations."
+        return self
+
     model_config = ConfigDict(
         from_attributes=True
     )
@@ -64,6 +99,7 @@ class AggregateHourPoint(BaseModel):
 
 class AggregateTrafficPattern(BaseModel):
     station_count: int
+    forecast_source: str = "trained_model"
     hourly_forecast: list[AggregateHourPoint]
     peak_hour: int
     peak_predicted_count: int
@@ -102,18 +138,10 @@ class CrowdModelMetrics(BaseModel):
     classes: list[str] = []
     confusion_matrix: list[list[int]] = []
     feature_importance: list[FeatureImportanceItem] = []
-    # Per-candidate breakdown (currently "random_forest" and "xgboost"
-    # keys) so a caller can show both models side by side instead of
-    # only whichever one won on held-out MAE at training time. The
-    # flat fields above still mirror the winner, for any older caller
-    # that only reads those.
+
     models: dict[str, CrowdSingleModelMetrics] = {}
 
 class RegressionSingleModelMetrics(BaseModel):
-    """Same shape as CrowdSingleModelMetrics minus the
-    classification-only fields (accuracy/macro_f1/critical_recall/
-    classes/confusion_matrix) that don't apply to a pure regression
-    target such as delay minutes or recommended headway minutes."""
     available: bool
     model_name: str | None = None
     mae: float | None = None
@@ -124,11 +152,6 @@ class RegressionSingleModelMetrics(BaseModel):
     feature_importance: list[FeatureImportanceItem] = []
 
 class RegressionModelMetrics(BaseModel):
-    """Live evaluation metrics for a pure-regression production model
-    (delay or frequency), same role as CrowdModelMetrics plays for the
-    crowd/demand model. The flat fields mirror the winning candidate;
-    `models` carries every trained candidate (random_forest, xgboost)
-    for side-by-side comparison."""
     available: bool
     model_name: str | None = None
     mae: float | None = None

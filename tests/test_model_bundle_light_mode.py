@@ -1,8 +1,3 @@
-"""Tests for the Render Free (512MB) production-model memory fix:
-AI_MODEL_LIGHT_MODE now defaults to True, and app.ai_engine.model_bundle
-prunes a loaded bundle down to just its winning model before it's ever
-cached - see app/core/config.py and app/ai_engine/model_bundle.py.
-"""
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -13,11 +8,7 @@ from app.ai_engine import model_bundle
 from app.ai_engine.prediction import crowd_predictor
 from app.core.config import settings
 
-
 class _FakeModel:
-    """Minimal stand-in for a fitted sklearn/xgboost regressor - just
-    enough surface (.predict()) for prune_to_winner()/the predictor
-    code to treat it like a real model."""
 
     def __init__(self, value: float):
         self.value = value
@@ -25,10 +16,7 @@ class _FakeModel:
     def predict(self, X):
         return np.array([self.value] * len(X))
 
-
 def _two_model_bundle(winner_name: str = "xgboost") -> dict:
-    """A bundle shaped exactly like a real saved crowd/delay/frequency
-    .pkl before pruning: two fully-trained candidates under `models`."""
     rf = _FakeModel(100.0)
     xgb = _FakeModel(200.0)
     candidates = {"random_forest": rf, "xgboost": xgb}
@@ -39,17 +27,12 @@ def _two_model_bundle(winner_name: str = "xgboost") -> dict:
         "models": candidates,
     }
 
-
 class TestLightModeDefaultsOn:
-    """1. AI_MODEL_LIGHT_MODE is enabled by default."""
 
     def test_light_mode_enabled_by_default(self):
         assert settings.AI_MODEL_LIGHT_MODE is True
 
-
 class TestPruneToWinner:
-    """2. A bundle containing RandomForest + XGBoost is reduced to only
-    its winning model."""
 
     def test_prunes_to_single_winning_model(self, monkeypatch):
         monkeypatch.setattr(settings, "AI_MODEL_LIGHT_MODE", True)
@@ -73,10 +56,7 @@ class TestPruneToWinner:
         monkeypatch.setattr(settings, "AI_MODEL_LIGHT_MODE", True)
         assert model_bundle.prune_to_winner(None) is None
 
-
 class TestPredictorInterfaceUnchanged:
-    """3. The predictor still returns the same prediction interface
-    after a bundle has been pruned to one model."""
 
     def test_predict_crowd_shape_unchanged_after_pruning(self, monkeypatch):
         pruned_bundle = model_bundle.prune_to_winner(_two_model_bundle(winner_name="xgboost"))
@@ -84,9 +64,6 @@ class TestPredictorInterfaceUnchanged:
 
         result = crowd_predictor.predict_crowd(station_id=1)
 
-        # Same top-level interface as an unpruned bundle would return -
-        # only the *number* of entries in `models` differs (1 instead
-        # of 2), not the shape of the response.
         assert set(result.keys()) == {
             "station_id", "target_datetime", "predicted_count",
             "confidence", "model_version", "models",
@@ -95,9 +72,7 @@ class TestPredictorInterfaceUnchanged:
         assert result["model_version"] == "xgboost_v1"
         assert set(result["models"].keys()) == {"xgboost"}
 
-
 class TestJoblibLoadOncePerKey:
-    """4. joblib.load happens at most once per model key."""
 
     def test_get_or_load_calls_joblib_load_once_for_repeated_calls(self, monkeypatch):
         monkeypatch.setattr(model_bundle, "_registry", {})

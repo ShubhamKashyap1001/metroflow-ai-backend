@@ -1,7 +1,3 @@
-"""Feature engineering helpers shared by the training scripts and the
-live predictors, so features are computed identically at train and
-inference time.
-"""
 import pandas as pd
 
 def add_time_features(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:

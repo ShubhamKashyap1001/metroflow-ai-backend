@@ -1,29 +1,3 @@
-"""Stdlib-only, multi-PROCESS (not multi-thread) test that proves the
-leader-election ALGORITHM used in app/simulator/leader_election.py and
-app/core/cache.py's try_acquire_or_renew_lock/release_lock is correct:
-  1. Mutual exclusion: at any instant, at most one of N real OS
-     processes believes it is the leader / would be running the
-     simulator loop.
-  2. Automatic failover: if the current leader is hard-killed
-     (SIGKILL - no graceful release, simulating a real crash), a
-     different process takes over within a bounded time (lease TTL +
-     one poll interval).
-  3. No duplicate "writes": using non-overlapping leadership intervals
-     as a stand-in for "only the leader writes to the DB / broadcasts
-     events", no two processes are ever both in a "write" state.
-
-This sandbox has no network access to `pip install redis` (or
-fastapi/sqlalchemy), so it cannot run the real redis-py client against
-a real Redis server, or boot the actual FastAPI app with --workers N.
-This harness therefore reimplements the exact CAS semantics of the two
-Lua scripts in app/core/cache.py (acquire-or-renew, release) against an
-in-memory store shared across real processes via multiprocessing, and
-drives it with the same acquire/poll/step-down loop shape as
-LeaderElection._election_tick(). It is a verification of the
-COORDINATION ALGORITHM, not an integration test of redis-py or the
-FastAPI app - see docs/background-jobs-and-leader-election.md for exactly what is and isn't
-covered by this.
-"""
 import multiprocessing as mp
 import os
 import signal
@@ -36,12 +10,7 @@ KILL_LEADER_AT_SECONDS = 3.5
 NUM_WORKERS = 3
 LOCK_KEY = "test_leader_lock"
 
-
 def fake_acquire_or_renew(store, lock, key, holder, ttl):
-    """Exact logic of cache.py's _ACQUIRE_OR_RENEW_LOCK_SCRIPT, but as
-    Python protected by a multiprocessing.Lock instead of Redis's
-    single-threaded execution - both give the GET-then-SET atomicity
-    the algorithm depends on."""
     with lock:
         now = time.time()
         entry = store.get(key)
@@ -49,7 +18,6 @@ def fake_acquire_or_renew(store, lock, key, holder, ttl):
             store[key] = (holder, now + ttl)
             return True
         return False
-
 
 def worker(idx, store, lock, events, kill_flag, ready_barrier):
     holder_id = f"worker-{idx}-{os.getpid()}"
@@ -59,11 +27,7 @@ def worker(idx, store, lock, events, kill_flag, ready_barrier):
     end_time = time.time() + TEST_DURATION_SECONDS
     while time.time() < end_time:
         if kill_flag.value == idx:
-            # A real crash (SIGKILL) never gets to run any more Python,
-            # let alone a graceful release_lock() - it just stops. This
-            # branch exists only so the *survivor* processes' loop can
-            # keep running in this same test process tree; the actual
-            # kill is delivered by the parent via os.kill(SIGKILL).
+
             return
         won = fake_acquire_or_renew(store, lock, LOCK_KEY, holder_id, TTL_SECONDS)
         now = time.time()
@@ -80,7 +44,6 @@ def worker(idx, store, lock, events, kill_flag, ready_barrier):
         time.sleep(POLL_SECONDS)
     if is_leader:
         events.append(("end_while_leader", idx, holder_id, leader_since, time.time()))
-
 
 def main():
     mgr = mp.Manager()
@@ -121,9 +84,8 @@ def main():
     for i, p in enumerate(procs):
         p.join(timeout=TEST_DURATION_SECONDS + 2)
 
-    # ---- Analysis ----
     evs = sorted(events, key=lambda e: e[-1])
-    intervals = []  # (idx, start, end)
+    intervals = []  
     open_leader = {}
     for e in evs:
         kind = e[0]
@@ -135,12 +97,9 @@ def main():
             if since is not None:
                 intervals.append((idx, since, until))
             open_leader.pop(idx, None)
-    # any leader still "open" at process end (killed leader never emits
-    # step_down/end_while_leader - it was SIGKILLed) - close its interval
-    # at the moment its lease was next successfully taken by someone else,
-    # which is the most realistic bound on "how long could it have kept writing".
+
     for idx, since in open_leader.items():
-        # find the next acquire by a different idx after `since`
+
         next_acquire = min(
             (e[3] for e in evs if e[0] == "acquire" and e[1] != idx and e[3] > since),
             default=since,
@@ -151,7 +110,6 @@ def main():
     for idx, s, e in sorted(intervals, key=lambda x: x[1]):
         print(f"  worker-{idx}: {s - start_time:.2f}s -> {e - start_time:.2f}s")
 
-    # 1. Mutual exclusion: no two intervals (different idx) overlap.
     overlaps = []
     for a in range(len(intervals)):
         for b in range(a + 1, len(intervals)):
@@ -161,7 +119,6 @@ def main():
             if i1[1] < i2[2] and i2[1] < i1[2]:
                 overlaps.append((intervals[a], intervals[b]))
 
-    # 2. Failover happened, and within a bounded time.
     distinct_leaders = sorted(set(idx for idx, _, _ in intervals))
     failover_ok = killed_idx is not None and len(distinct_leaders) >= 2
 
@@ -175,8 +132,6 @@ def main():
         if next_leader_start is not None:
             failover_gap = next_leader_start - killed_interval[2]
 
-    # 3. No duplicate writes: no two "write" events from different idx
-    #    with overlapping leader intervals (implied by #1, checked directly too).
     writes = [e for e in evs if e[0] == "write"]
     write_conflicts = 0
     for i in range(len(writes)):
@@ -204,7 +159,6 @@ def main():
     )
     print(f"\n[harness] OVERALL: {'PASS' if all_pass else 'FAIL'}")
     return 0 if all_pass else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

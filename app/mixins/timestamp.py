@@ -7,7 +7,6 @@ from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 
 class TimestampMixin:
-    """Adds created_at / updated_at columns, managed by the database."""
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

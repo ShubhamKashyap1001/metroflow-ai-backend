@@ -1,7 +1,3 @@
-"""Milestone 2 - AI Prediction Module: train frequency recommendation
-inference. Supports the Scheduling Management Module's "frequency
-adjustment" workflow with a data-driven suggestion.
-"""
 import logging
 import os
 from datetime import datetime, timezone
@@ -18,25 +14,14 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "saved_models", "freq
 MIN_FREQUENCY = 3
 MAX_FREQUENCY = 15
 
-# Every raw input this predictor can actually compute - see
-# recommend_frequency() below. Used to validate a loaded bundle's
-# `features` list before trusting its column order (see
-# model_bundle.validate_feature_contract).
 KNOWN_FEATURES = {"station_id", "hour", "day_of_week", "is_weekend", "is_peak_hour"}
 
 def _load_model():
-    # See crowd_predictor._load_model - same shared, thread-safe,
-    # load-once registry (app.ai_engine.model_bundle.get_or_load).
+
     return model_bundle.get_or_load("frequency", MODEL_PATH)
 
 def recommend_frequency(station_id: int, target_datetime: datetime | None = None) -> dict:
     dt = target_datetime or datetime.now(timezone.utc)
-    # BUGFIX (naive datetime / timezone handling): same fix as
-    # crowd_predictor.predict_crowd / delay_predictor.predict_delay -
-    # peak-hour/weekend features are business-local concepts, derived
-    # from `dt` converted into the app's configured business timezone
-    # rather than `dt`'s own tzinfo. `dt` itself is unchanged. See
-    # app/utils/timezone.py.
     local_dt = to_business_time(dt)
     hour = local_dt.hour
     day_of_week = local_dt.weekday()
@@ -89,7 +74,6 @@ def recommend_frequency(station_id: int, target_datetime: datetime | None = None
         "is_peak_hour": bool(is_peak_hour),
         "recommended_frequency_minutes": round(recommended, 1),
         "model_version": model_version,
-        # Per-candidate breakdown (random_forest / xgboost), same
-        # pattern as crowd_predictor.predict_crowd's `models` field.
+
         "models": per_model,
     }

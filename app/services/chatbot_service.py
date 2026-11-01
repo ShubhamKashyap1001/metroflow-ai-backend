@@ -97,9 +97,6 @@ SYSTEM_PROMPT = (
     "panel. Plain paragraphs, bold labels, and bullet lists only."
 )
 
-# Gemini function-declaration format: {"name", "description", "parameters"}
-# where "parameters" is a (subset-of-OpenAPI) JSON schema using
-# upper-case type names, e.g. "OBJECT" / "STRING".
 TOOLS = [
     {
         "name": "get_station_status",
@@ -179,19 +176,11 @@ TOOLS = [
     },
 ]
 
-# Hard cap on model<->tool round-trips per user message, so a
-# confused model can't loop forever (and can't run up API cost) on
-# one request. One user question realistically needs at most one or
-# two tool calls.
 MAX_TOOL_ITERATIONS = 4
 
 _client = None
 
-
 def _get_client():
-    """The Gemini client is created lazily so importing this module
-    never fails just because the API key isn't configured yet (dev
-    boxes, CI, etc.) - only actually sending a chat message does."""
     global _client
     if _client is None:
         if not settings.GEMINI_API_KEY:
@@ -204,7 +193,6 @@ def _get_client():
         _client = genai.Client(api_key=settings.GEMINI_API_KEY)
     return _client
 
-
 def _run_tool(db: Session, tool_name: str, tool_input: dict) -> dict:
     if tool_name == "get_station_status":
         return chatbot_tools.get_station_status(db, tool_input.get("station_name", ""))
@@ -216,11 +204,7 @@ def _run_tool(db: Session, tool_name: str, tool_input: dict) -> dict:
         return chatbot_tools.get_busiest_stations(db, tool_input.get("state"))
     return {"error": f"Unknown tool '{tool_name}'"}
 
-
 def _to_contents(messages: list[ChatMessage]) -> list[dict]:
-    """Gemini uses role "model" for the assistant's turn (not
-    "assistant" like the frontend/Anthropic convention) - everything
-    else maps straight across."""
     return [
         {
             "role": "model" if m.role == "assistant" else "user",
@@ -228,7 +212,6 @@ def _to_contents(messages: list[ChatMessage]) -> list[dict]:
         }
         for m in messages
     ]
-
 
 def send_message(db: Session, messages: list[ChatMessage]) -> str:
     if len(messages) > settings.CHATBOT_MAX_HISTORY_MESSAGES:
@@ -260,10 +243,6 @@ def send_message(db: Session, messages: list[ChatMessage]) -> str:
             if not function_calls:
                 break
 
-            # Echo the model's turn (including its function-call
-            # part(s)) back into the conversation before appending the
-            # tool results - the shape Gemini expects for multi-turn
-            # function calling.
             contents.append({"role": "model", "parts": parts})
 
             response_parts = []
@@ -278,9 +257,7 @@ def send_message(db: Session, messages: list[ChatMessage]) -> str:
                 )
             contents.append({"role": "user", "parts": response_parts})
         else:
-            # Exhausted MAX_TOOL_ITERATIONS still asking for tools -
-            # force a plain answer with whatever real data has
-            # already been gathered rather than looping further.
+
             response = client.models.generate_content(
                 model=settings.CHATBOT_MODEL,
                 contents=contents,

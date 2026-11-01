@@ -5,7 +5,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "verify_ws_connection_limits.py"
 
-
 def test_ws_connection_limits_verification_script_passes():
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],

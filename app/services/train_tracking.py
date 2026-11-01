@@ -24,10 +24,6 @@ def segment_gap_seconds(start: time, end: time) -> int:
     return max(diff, MIN_SEGMENT_SECONDS)
 
 def _load_from_redis() -> bool:
-    """Try to hydrate the process-local cache from Redis instead of
-    hitting Postgres. Returns True on a usable hit. JSON round-trips
-    dict keys as strings, so train_id is cast back to int on the way
-    in."""
     global _routes_cache, _segment_seconds_cache, _routes_cache_at
 
     cached = cache.get_json(_ROUTE_CACHE_KEY)
@@ -42,24 +38,13 @@ def _load_from_redis() -> bool:
     return True
 
 def _refresh_route_cache(db: Session) -> None:
-    """(Re)builds the route + segment-duration cache for every train
-    that has a schedule. Deliberately not scoped to a specific
-    train_ids list - a full refresh covers every train at once, so a
-    request for a different subset of trains later doesn't trigger yet
-    another rebuild."""
     global _routes_cache, _segment_seconds_cache, _routes_cache_at
 
     routes: dict[int, list[int]] = {}
     arrival_times: dict[int, list[time]] = {}
                                                                
     seen_stations: dict[int, set[int]] = {}
-    # Only the 3 columns actually used below - pulling full ORM rows
-    # (15 columns incl. platform_number, day_type, actual_*, timestamps
-    # etc., none read here) multiplies the payload for no reason. On a
-    # schedule table with hundreds of thousands of rows that's enough
-    # extra transfer time/size for Postgres to drop the connection
-    # mid-query, which leaves routes empty (and Active Trains stuck at
-    # 0) run after run even though nothing actually errors loudly.
+
     schedules = (
         db.query(TrainSchedule.train_id, TrainSchedule.station_id, TrainSchedule.arrival_time)
         .order_by(TrainSchedule.train_id, TrainSchedule.arrival_time, TrainSchedule.id)
@@ -95,9 +80,6 @@ def _refresh_route_cache(db: Session) -> None:
     )
 
 def _delay_by_station_for(db: Session, train_ids: list[int]) -> dict[int, dict[int, int]]:
-    """Always fetched fresh (never cached) - this is exactly the part
-    of build_routes() that must never be stale, since delay_minutes is
-    what live tracking exists to surface."""
     if not train_ids:
         return {}
     rows = (
@@ -111,29 +93,6 @@ def _delay_by_station_for(db: Session, train_ids: list[int]) -> dict[int, dict[i
     return delay_by_station
 
 def invalidate_route_cache() -> None:
-    """Drop the route/segment-duration cache after a schedule row is
-    created or edited (arrival_time, station_sequence, or a brand new
-    stop for a train all change the shape of build_routes()' output).
-
-    BUGFIX (stale cached data): this cache was previously invalidated
-    by NOTHING - only TTL expiry (_ROUTE_CACHE_TTL_SECONDS = 300s) or a
-    train_id that had never been seen before ever forced a rebuild.
-    Editing an existing schedule row's arrival_time (retiming a stop,
-    which changes every adjacent segment_seconds gap) or adding a new
-    stop to a train that already has a cached route left the Live
-    Train Map's ETAs and /trains/routes computed off the pre-edit
-    route/segment data for up to 5 minutes after the write committed -
-    a real, user-visible staleness window, not just the deliberately
-    "never cached" delay_minutes this module's own docstring already
-    calls out.
-
-    Clears BOTH layers: the Redis-backed key (so any process that
-    currently has this train_id cached, or that reads via
-    _load_from_redis before its own TTL check, doesn't hydrate a stale
-    snapshot) and this process's local dict/timestamp (so the very
-    same request path that just wrote the schedule sees the resulting
-    route on its next read, instead of waiting out this process's own
-    remaining TTL window)."""
     global _routes_cache, _segment_seconds_cache, _routes_cache_at
     cache.delete(_ROUTE_CACHE_KEY)
     _routes_cache = {}

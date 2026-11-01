@@ -16,11 +16,6 @@ STATE_CITY_MAP: dict[str, list[str]] = {
 MIN_STATIONS_FOR_SUFFICIENT_DATA = 3
 
 def cities_for_state(state: str | None) -> list[str] | None:
-    """Cities belonging to `state`, or None if no filter was requested.
-
-    Also accepts a raw city name (e.g. `?state=Mumbai`) so callers that
-    already know the city don't need to look up its state first.
-    """
     if not state:
         return None
 
