@@ -212,7 +212,8 @@ def home():
     }
 
 @app.api_route('/healthz', methods=["GET", "HEAD"])
-def healthz():
+@limiter.limit("10000/minute")
+def healthz(request: Request):
     return {"status": "ok"}
 
 _WS_AUTH_SUBPROTOCOL = "access_token"
