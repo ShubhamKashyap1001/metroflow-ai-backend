@@ -56,8 +56,9 @@ class Settings(BaseSettings):
 
     BUSINESS_TIMEZONE: str = "Asia/Kolkata"
 
-    REDIS_URL: str | None = "redis://localhost:6379/0"
-    CACHE_ENABLED: bool = True
+    REDIS_URL: str | None = None
+    CACHE_ENABLED: bool = False
+    RATE_LIMIT_USE_REDIS: bool = False
                                                                        
     CACHE_TTL_SECONDS: int = 5
 
