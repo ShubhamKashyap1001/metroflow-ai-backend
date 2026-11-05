@@ -41,14 +41,19 @@ def _redis_reachable(url: str) -> bool:
 
 def _build_limiter() -> Limiter:
     storage_uri = None
-    if settings.REDIS_URL and _redis_reachable(settings.REDIS_URL):
+    if settings.RATE_LIMIT_USE_REDIS and settings.REDIS_URL and _redis_reachable(settings.REDIS_URL):
         storage_uri = settings.REDIS_URL
-    elif settings.REDIS_URL:
+    elif settings.RATE_LIMIT_USE_REDIS and settings.REDIS_URL:
         logger.warning(
             "[rate_limit] Redis unreachable at startup - falling back to "
             "in-memory rate-limit storage. Limits will only be correct "
             "per-process (not shared across workers) until Redis is "
             "reachable again."
+        )
+    elif not settings.RATE_LIMIT_USE_REDIS:
+        logger.info(
+            "[rate_limit] using in-memory rate-limit storage; limits are "
+            "per-process and require one worker for shared behavior."
         )
 
     return Limiter(

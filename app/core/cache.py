@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 import redis
@@ -26,6 +27,48 @@ _next_retry_at = 0.0
 _current_backoff = _BACKOFF_FLOOR_SECONDS
 _last_state_connected: bool | None = None                                        
 _last_error: str | None = None
+_local_cache_lock = threading.Lock()
+_local_cache: OrderedDict[str, tuple[str, float | None]] = OrderedDict()
+_LOCAL_CACHE_MAX_ENTRIES = 5000
+
+def _local_get_raw(key: str) -> str | None:
+    now = time.monotonic()
+    with _local_cache_lock:
+        entry = _local_cache.get(key)
+        if entry is None:
+            return None
+        raw, expires_at = entry
+        if expires_at is not None and expires_at <= now:
+            _local_cache.pop(key, None)
+            return None
+        _local_cache.move_to_end(key)
+        return raw
+
+def _local_set_raw(key: str, raw: str, ttl_seconds: int | None) -> None:
+    expires_at = time.monotonic() + ttl_seconds if ttl_seconds is not None else None
+    with _local_cache_lock:
+        _local_cache[key] = (raw, expires_at)
+        _local_cache.move_to_end(key)
+        while len(_local_cache) > _LOCAL_CACHE_MAX_ENTRIES:
+            _local_cache.popitem(last=False)
+
+def _local_set_nx(key: str, raw: str, ttl_seconds: int) -> bool:
+    now = time.monotonic()
+    with _local_cache_lock:
+        entry = _local_cache.get(key)
+        if entry is not None:
+            _, expires_at = entry
+            if expires_at is None or expires_at > now:
+                return False
+        _local_cache[key] = (raw, now + ttl_seconds)
+        _local_cache.move_to_end(key)
+        while len(_local_cache) > _LOCAL_CACHE_MAX_ENTRIES:
+            _local_cache.popitem(last=False)
+        return True
+
+def _local_delete(key: str) -> None:
+    with _local_cache_lock:
+        _local_cache.pop(key, None)
 
 def _log_state_change(connected: bool, error: str | None = None) -> None:
     global _last_state_connected, _last_error
@@ -113,12 +156,19 @@ def _get_client() -> "redis.Redis | None":
 def get_json(key: str) -> Any | None:
     client = _get_client()
     if client is None:
-        return None
+        raw = _local_get_raw(key)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            _local_delete(key)
+            return None
     try:
         raw = client.get(key)
     except Exception as exc:                
         _mark_down(exc)
-        return None
+        raw = _local_get_raw(key)
     if raw is None:
         return None
     try:
@@ -127,38 +177,40 @@ def get_json(key: str) -> Any | None:
         return None
 
 def set_json(key: str, value: Any, ttl_seconds: int | None = None) -> None:
+    ttl = ttl_seconds if ttl_seconds is not None else settings.CACHE_TTL_SECONDS
+    raw = json.dumps(value, default=str)
+    _local_set_raw(key, raw, ttl)
     client = _get_client()
     if client is None:
         return
     try:
-        client.set(
-            key,
-            json.dumps(value, default=str),
-            ex=ttl_seconds if ttl_seconds is not None else settings.CACHE_TTL_SECONDS,
-        )
+        client.set(key, raw, ex=ttl)
     except Exception as exc:                
         _mark_down(exc)
 
 def set_json_persistent(key: str, value: Any) -> None:
+    raw = json.dumps(value, default=str)
+    _local_set_raw(key, raw, None)
     client = _get_client()
     if client is None:
         return
     try:
-        client.set(key, json.dumps(value, default=str))
+        client.set(key, raw)
     except Exception as exc:                
         _mark_down(exc)
 
 def set_nx(key: str, ttl_seconds: int) -> bool:
     client = _get_client()
     if client is None:
-        return True
+        return _local_set_nx(key, "1", ttl_seconds)
     try:
         return bool(client.set(key, "1", nx=True, ex=ttl_seconds))
     except Exception as exc:                
         _mark_down(exc)
-        return True
+        return _local_set_nx(key, "1", ttl_seconds)
 
 def delete(key: str) -> None:
+    _local_delete(key)
     client = _get_client()
     if client is None:
         return
